@@ -1,9 +1,14 @@
 """
-h6_cyclist_crossing.py — Cyclist crosses intersection, ego yields with emergency brake.
+h6_cyclist_crossing.py — Cyclist crosses intersection; ego emergency brakes to yield.
 
 Criticality: HIGH
 Map: Town03
 Duration: 20s
+
+Reliability fixes:
+- Cyclist spawned 22m ahead using waypoints, offset 5m to right (approaching lane)
+- Speed-gated trigger: only fires when ego is actually moving
+- Fallback at FALLBACK_S
 """
 import sys
 from pathlib import Path
@@ -15,15 +20,12 @@ from scripts.autonomous.autopilot_controller import AutopilotController
 from scripts.data_collection.recorder import Recorder
 
 DURATION      = 20.0
-CRITICAL_TIME =  8.0   # seconds into run when ego brakes to yield to cyclist
+MIN_SPEED_KMH = 12.0
+WARMUP_S      =  5.0
+FALLBACK_S    = 12.0
 
 
 class H6CyclistCrossing(ScenarioBase):
-    """
-    Ego approaches an intersection at 35 km/h. A cyclist crosses the road.
-    At t=8s the ego performs a forced emergency brake to yield.
-    """
-
     def __init__(self, **kwargs):
         super().__init__(map_name="Town03", spawn_index=2, **kwargs)
 
@@ -31,43 +33,48 @@ class H6CyclistCrossing(ScenarioBase):
         self.world.set_weather(carla.WeatherParameters.WetCloudyNoon)
 
         npcs = []
-        bp_lib       = self.world.get_blueprint_library()
-        spawn_points = self.world.get_map().get_spawn_points()
+        bp_lib = self.world.get_blueprint_library()
 
-        # --- Spawn cyclist (slow bicycle NPC) ---
+        # Find a bicycle blueprint
         cyclist_bp = None
-        for name in ("vehicle.gazelle.omafiets", "vehicle.bh.crossbike", "vehicle.diamondback.century"):
+        for name in ("vehicle.gazelle.omafiets", "vehicle.bh.crossbike",
+                     "vehicle.diamondback.century", "vehicle.carlacola.cybertruck"):
             try:
                 cyclist_bp = bp_lib.find(name)
                 break
-            except IndexError:
+            except (IndexError, Exception):
                 continue
-
         if cyclist_bp is None:
-            candidates = bp_lib.filter("vehicle.*")
-            cyclist_bp = next(
-                (b for b in candidates if any(k in b.id for k in ("bike", "cycle", "cross"))),
-                candidates[0],
-            )
+            bikes = [b for b in bp_lib.filter("vehicle.*")
+                     if any(k in b.id for k in ("bike", "cycle", "cross", "gazelle"))]
+            cyclist_bp = bikes[0] if bikes else bp_lib.filter("vehicle.*")[0]
 
-        if len(spawn_points) > 5:
-            cyclist_transform = carla.Transform(
-                spawn_points[5].location + carla.Location(x=0, y=8, z=0.3),
-                carla.Rotation(yaw=spawn_points[5].rotation.yaw + 90),
-            )
-            cyclist = self.world.try_spawn_actor(cyclist_bp, cyclist_transform)
-            if cyclist:
-                npcs.append(cyclist)
-                cyclist.set_autopilot(True, self.traffic_manager.get_port())
-                self.traffic_manager.vehicle_percentage_speed_difference(cyclist, 80)
-                self.traffic_manager.ignore_lights_percentage(cyclist, 100)
+        # Spawn cyclist 22m ahead, 5m to the right — crossing from the side
+        ego_wp    = self.world.get_map().get_waypoint(self.ego.get_location())
+        ahead_wps = ego_wp.next(22.0)
+        cyclist   = None
 
-        # --- Ego autopilot ---
+        if ahead_wps:
+            fwd   = ahead_wps[0].transform.get_forward_vector()
+            right = carla.Vector3D(x=-fwd.y, y=fwd.x, z=0.0)
+            loc   = (
+                ahead_wps[0].transform.location
+                + carla.Location(x=right.x * 5.0, y=right.y * 5.0, z=0.3)
+            )
+            # Cyclist faces perpendicular — crossing left to right from ego's view
+            cyclist_rot = carla.Rotation(yaw=ahead_wps[0].transform.rotation.yaw + 90)
+            cyclist = self.world.try_spawn_actor(cyclist_bp, carla.Transform(loc, cyclist_rot))
+
+        if cyclist:
+            npcs.append(cyclist)
+            cyclist.set_autopilot(True, self.traffic_manager.get_port())
+            self.traffic_manager.vehicle_percentage_speed_difference(cyclist, 70)   # slow
+            self.traffic_manager.ignore_lights_percentage(cyclist, 100)
+
         if ap is None:
             ap = AutopilotController(self.ego, self.traffic_manager, target_speed_kmh=35)
         ap.enable()
 
-        # --- Recording loop ---
         if rec is None:
             rec = Recorder(self)
             rec.__enter__()
@@ -87,10 +94,16 @@ class H6CyclistCrossing(ScenarioBase):
                 rec.record(frame)
                 elapsed = frame["timestamp"] - start
 
-                if elapsed >= CRITICAL_TIME and not critical_triggered:
+                fire = (
+                    not critical_triggered
+                    and elapsed >= WARMUP_S
+                    and (frame["speed_kmh"] > MIN_SPEED_KMH or elapsed >= FALLBACK_S)
+                )
+
+                if fire:
                     critical_triggered = True
                     with ap.override():
-                        for _ in range(25):
+                        for _ in range(28):   # ~1.4 s
                             self.ego.apply_control(
                                 carla.VehicleControl(brake=1.0, throttle=0.0)
                             )
