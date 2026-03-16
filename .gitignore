@@ -1,1 +1,19 @@
+# Secrets
 .env
+
+# Recorded data (too large for git — use external storage)
+data/scenarios/
+data/explanations/
+
+# ML model weights (downloaded automatically by ultralytics)
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS
+.DS_Store
