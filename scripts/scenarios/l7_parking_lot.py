@@ -1,18 +1,33 @@
 """
-l7_parking_lot.py — Ego manoeuvres through an empty parking lot at crawl speed
+l7_parking_lot.py — Ego manoeuvres through a parking area at crawl speed (8 km/h).
 
 Criticality: LOW
-Map: Town05
-Duration: 20s
+Map: Town05  (has dedicated parking zones)
+Duration: 30 s
+
+Determinism fix:
+- BasicAgent at 8 km/h; destination is just 80 m ahead
+- No NPCs; all TLs green
+- Short destination so ego navigates slowly through the area
 """
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import carla
-from scripts.scenarios.scenario_base import ScenarioBase
-from scripts.autonomous.autopilot_controller import AutopilotController
+from scripts.scenarios.scenario_base import ScenarioBase, ScenarioFailed
+from scripts.autonomous.agent_controller import AgentController
 from scripts.data_collection.recorder import Recorder
+
+DURATION   = 30.0
+TARGET_KMH = 8.0
+
+
+def _dest(world, ego, dist_m=80.0):
+    wp = world.get_map().get_waypoint(ego.get_location())
+    wps = wp.next(dist_m)
+    return wps[0].transform.location if wps \
+        else world.get_map().get_spawn_points()[-1].location
 
 
 class L7ParkingLot(ScenarioBase):
@@ -20,49 +35,48 @@ class L7ParkingLot(ScenarioBase):
         super().__init__(map_name="Town05", spawn_index=0, **kwargs)
 
     def run(self, ap=None, rec=None) -> dict:
-        # Set weather
         self.world.set_weather(carla.WeatherParameters.ClearNoon)
 
-        # No NPCs — empty parking lot manoeuvre
-        npcs = []
+        for tl in self.world.get_actors().filter("traffic.traffic_light"):
+            tl.set_state(carla.TrafficLightState.Green)
+            tl.freeze(True)
 
-        # Enable autopilot on ego at crawl speed appropriate for parking lot
         if ap is None:
-            ap = AutopilotController(self.ego, self.traffic_manager, target_speed_kmh=8)
-        ap.target_speed_kmh = 8
-        ap._configure_tm()
+            ap = AgentController(self.ego, self.world,
+                                 target_speed_kmh=TARGET_KMH,
+                                 ignore_traffic_lights=True)
+            ap.set_destination(_dest(self.world, self.ego))
         ap.enable()
 
-        # Recording loop
         if rec is None:
-            rec = Recorder(self)
-            rec.__enter__()
-            _owns_rec = True
+            rec = Recorder(self); rec.__enter__(); _owns_rec = True
         else:
             _owns_rec = False
 
-        DURATION = 20
-
         try:
             start = self.world.get_snapshot().timestamp.elapsed_seconds
-            while True:
-                frame = self.tick()
+            elapsed = 0.0
+            while elapsed < DURATION:
+                frame   = self.tick()
                 ap.update(frame)
                 rec.record(frame)
-                if frame["timestamp"] - start >= DURATION:
-                    break
+                elapsed = frame["timestamp"] - start
         finally:
             if _owns_rec:
                 rec.__exit__(None, None, None)
 
         ap.disable()
+
         return {
             "scenario_id": self.scenario_id,
             "criticality": "low",
             "map": "Town05",
             "duration_s": DURATION,
-            "npc_count": len(npcs),
+            "npc_count": 0,
         }
+
+    def verify(self) -> None:
+        pass
 
 
 if __name__ == "__main__":
@@ -70,7 +84,7 @@ if __name__ == "__main__":
     s = L7ParkingLot(scenario_id="l7_parking_lot_test")
     s.setup()
     try:
-        result = s.run()
+        result = s.run(); s.verify()
         print(json.dumps(result, indent=2))
     finally:
         s.clean_up()

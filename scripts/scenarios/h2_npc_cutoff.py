@@ -1,28 +1,38 @@
 """
-h2_npc_cutoff.py — NPC brakes suddenly on highway; ego emergency brakes.
+h2_npc_cutoff.py — NPC cuts in from left lane; ego emergency-brakes to avoid collision.
 
 Criticality: HIGH
 Map: Town04
-Duration: 25s
+Duration: 25 s
 
-Reliability fixes:
-- NPC spawned 25m ahead of ego using waypoints (guaranteed same lane/road)
-- Critical event fires when ego speed > MIN_SPEED_KMH, not at fixed time
-- Fallback at FALLBACK_S
+Determinism guarantee:
+1. All TLs frozen GREEN — ego drives at highway speed without stopping
+2. BasicAgent at 70 km/h; NPC spawned in LEFT adjacent lane 20 m ahead
+3. At trigger: NPC steer=0.3 + throttle=0.3 for 1 s to swerve right into ego's lane
+4. ap.override() forces ego brake=0.9 for ~2 s simultaneously
+5. Speed must be > MIN_SPEED_KMH before trigger fires → BRAKING guaranteed
 """
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import carla
-from scripts.scenarios.scenario_base import ScenarioBase
-from scripts.autonomous.autopilot_controller import AutopilotController
+from scripts.scenarios.scenario_base import ScenarioBase, ScenarioFailed
+from scripts.autonomous.agent_controller import AgentController
 from scripts.data_collection.recorder import Recorder
 
 DURATION      = 25.0
+TARGET_KMH    = 70.0
 MIN_SPEED_KMH = 40.0
 WARMUP_S      =  5.0
 FALLBACK_S    = 14.0
+
+
+def _dest(world, ego, dist_m=700.0):
+    wp = world.get_map().get_waypoint(ego.get_location())
+    wps = wp.next(dist_m)
+    return wps[0].transform.location if wps \
+        else world.get_map().get_spawn_points()[-1].location
 
 
 class H2NpcCutoff(ScenarioBase):
@@ -32,44 +42,46 @@ class H2NpcCutoff(ScenarioBase):
     def run(self, ap=None, rec=None) -> dict:
         self.world.set_weather(carla.WeatherParameters.WetCloudyNoon)
 
-        npcs = []
-        bp_lib     = self.world.get_blueprint_library()
-        car_bps    = [b for b in bp_lib.filter("vehicle.*") if b.get_attribute("number_of_wheels").as_int() == 4]
-        npc_bp     = car_bps[0] if car_bps else bp_lib.filter("vehicle.*")[0]
+        for tl in self.world.get_actors().filter("traffic.traffic_light"):
+            tl.set_state(carla.TrafficLightState.Green)
+            tl.freeze(True)
 
-        # Spawn NPC 25m ahead in the same lane using waypoints
-        ego_wp    = self.world.get_map().get_waypoint(self.ego.get_location())
-        ahead_wps = ego_wp.next(25.0)
-        npc       = None
+        bp_lib  = self.world.get_blueprint_library()
+        car_bps = [b for b in bp_lib.filter("vehicle.*")
+                   if b.get_attribute("number_of_wheels").as_int() == 4]
+        npc_bp  = car_bps[0] if car_bps else bp_lib.filter("vehicle.*")[0]
 
+        # Spawn NPC in LEFT lane 20 m ahead
+        ego_wp   = self.world.get_map().get_waypoint(self.ego.get_location())
+        ahead_wps = ego_wp.next(20.0)
+        npc = None
         if ahead_wps:
-            npc_transform = ahead_wps[0].transform
-            npc_transform.location.z += 0.5
-            npc = self.world.try_spawn_actor(npc_bp, npc_transform)
-
+            left_wp = ahead_wps[0].get_left_lane() or ahead_wps[0]
+            t = left_wp.transform; t.location.z += 0.5
+            npc = self.world.try_spawn_actor(npc_bp, t)
         if npc:
-            npcs.append(npc)
             npc.set_autopilot(True, self.traffic_manager.get_port())
-            self.traffic_manager.vehicle_percentage_speed_difference(npc, 0)
-            self.traffic_manager.distance_to_leading_vehicle(npc, 2.0)
+            self.traffic_manager.ignore_lights_percentage(npc, 100)
+            # NPC slightly faster so it stays near ego
+            self.traffic_manager.vehicle_percentage_speed_difference(npc, -5)
 
         if ap is None:
-            ap = AutopilotController(self.ego, self.traffic_manager, target_speed_kmh=80)
+            ap = AgentController(self.ego, self.world,
+                                 target_speed_kmh=TARGET_KMH,
+                                 ignore_traffic_lights=True)
+            ap.set_destination(_dest(self.world, self.ego))
         ap.enable()
 
         if rec is None:
-            rec = Recorder(self)
-            rec.__enter__()
-            _owns_rec = True
+            rec = Recorder(self); rec.__enter__(); _owns_rec = True
         else:
             _owns_rec = False
 
         critical_triggered = False
 
         try:
-            start   = self.world.get_snapshot().timestamp.elapsed_seconds
+            start = self.world.get_snapshot().timestamp.elapsed_seconds
             elapsed = 0.0
-
             while elapsed < DURATION:
                 frame   = self.tick()
                 ap.update(frame)
@@ -84,29 +96,29 @@ class H2NpcCutoff(ScenarioBase):
 
                 if fire:
                     critical_triggered = True
-
-                    # NPC sudden hard stop
+                    # NPC swerves right into ego's lane for ~1 s (20 ticks)
                     if npc and npc.is_alive:
                         npc.set_autopilot(False)
-                        npc.apply_control(carla.VehicleControl(brake=1.0, hand_brake=True))
-
-                    # Forced ego emergency brake
+                        for _ in range(20):
+                            npc.apply_control(
+                                carla.VehicleControl(steer=0.3, throttle=0.3)
+                            )
+                    # Ego emergency-brakes (~2 s = 40 ticks)
                     with ap.override():
-                        for _ in range(40):   # ~2 s
+                        for _ in range(40):
                             self.ego.apply_control(
-                                carla.VehicleControl(brake=1.0, throttle=0.0)
+                                carla.VehicleControl(brake=0.9, throttle=0.0)
                             )
                             frame   = self.tick()
                             ap.update(frame)
                             rec.record(frame)
                             elapsed = frame["timestamp"] - start
+
         finally:
             if _owns_rec:
                 rec.__exit__(None, None, None)
 
-        for npc in npcs:
-            if npc.is_alive:
-                npc.destroy()
+        if npc and npc.is_alive: npc.destroy()
         ap.disable()
 
         return {
@@ -114,8 +126,17 @@ class H2NpcCutoff(ScenarioBase):
             "criticality": "high",
             "map": "Town04",
             "duration_s": DURATION,
-            "npc_count": len(npcs),
+            "npc_count": 1 if npc else 0,
         }
+
+    def verify(self) -> None:
+        braking = [e for e in self._action_events
+                   if e["trigger_type"] == "BRAKING"]
+        if not braking:
+            raise ScenarioFailed(
+                f"{self.scenario_id}: expected BRAKING trigger. "
+                f"Got: {[e['trigger_type'] for e in self._action_events]}"
+            )
 
 
 if __name__ == "__main__":
@@ -124,6 +145,7 @@ if __name__ == "__main__":
     s.setup()
     try:
         result = s.run()
+        s.verify()
         print(json.dumps(result, indent=2))
     finally:
         s.clean_up()

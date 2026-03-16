@@ -22,6 +22,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scenario_base")
 
+
+class ScenarioFailed(RuntimeError):
+    """Raised by verify() when a scenario did not produce its required events."""
+
 # ---------------------------------------------------------------------------
 # Action trigger thresholds (from project brief)
 # ---------------------------------------------------------------------------
