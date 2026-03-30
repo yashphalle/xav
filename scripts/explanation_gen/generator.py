@@ -94,22 +94,27 @@ def _template_explanation(
 
     # ------------------------------------------------------------------
     # BRAKING — ordered by specificity of observed cause.
-    # CARLA telemetry state takes priority; YOLO is the fallback.
-    # Traffic light beats pedestrian because a red light is the primary
-    # legal cause of the stop even when pedestrians are also in frame.
+    # Emergency brakes (brake >= 0.8) use urgent language.
     # ------------------------------------------------------------------
     if trigger_type == "BRAKING":
-        if tl_state == "red":
-            return "Braking. Red light."
+        brake_val    = snap.get("brake", 0.0)
+        is_emergency = brake_val >= 0.8
+        prefix       = "Emergency brake!" if is_emergency else "Braking."
+
+        # Pedestrian/cyclist take highest priority
+        if has_pedestrian:
+            return f"{prefix} Pedestrian ahead."
+        if has_cyclist:
+            return f"{prefix} Cyclist ahead."
+        # Vehicle in frame during emergency = cut-in or obstacle
+        has_vehicle = any(c in (yolo_nearby or []) for c in ("car", "truck", "bus", "motorcycle"))
+        if is_emergency and has_vehicle:
+            return "Emergency brake! Vehicle ahead."
         if tl_state == "yellow":
             return "Braking. Yellow light."
-        if has_yolo_tl:                   # fallback: CARLA state not in telemetry
-            return "Braking. Red light."
-        if has_pedestrian:
-            return "Braking. Pedestrian ahead."
-        if has_cyclist:
-            return "Braking. Cyclist ahead."
-        return "Braking. Obstacle ahead."
+        if tl_state == "red" or has_yolo_tl:
+            return f"{prefix} Red light."
+        return f"{prefix} Obstacle ahead." if is_emergency else "Braking. Obstacle ahead."
 
     # ------------------------------------------------------------------
     # ACCELERATING
@@ -137,10 +142,10 @@ def _template_explanation(
         return "Adjusting speed."
 
     if trigger_type == "PEDESTRIAN_CLOSE":
-        return "Pedestrian detected."
+        return "Pedestrian crossing!"
 
     if trigger_type == "COLLISION_RISK":
-        return "Hazard detected."
+        return "Collision risk! Braking hard."
 
     return trigger_type.replace("_", " ").capitalize() + "."
 

@@ -43,12 +43,17 @@ def main():
                         help="Run number (appended to output directory name)")
     parser.add_argument("--out", default=None,
                         help="Output root directory (default: data/scenarios/)")
+    parser.add_argument("--skip-map-reload", action="store_true",
+                        help="Do NOT call load_world() — use whatever map CARLA "
+                             "already has loaded. Required on RTX 5060 (Blackwell) "
+                             "to avoid Signal 11 segfault on map switches.")
     args = parser.parse_args()
 
     runner = AdaptTrustRunner(
         scenario_id=args.scenario,
         run_id=args.run,
         output_root=args.out,
+        skip_map_reload=args.skip_map_reload,
     )
     result = runner.run()
     print(json.dumps(result, indent=2))

@@ -73,6 +73,13 @@ EXPL_AREA_TOP  = 0.80          # explanation stays in bottom 20% of frame
 DISPLAY_BEFORE_S = 2.0
 DISPLAY_AFTER_S  = 3.0
 
+# Idle subtitle shown continuously on LLM conditions when no event is active
+_IDLE_TEXT = {
+    "descriptive":  "GPT-4o  |  Monitoring driving events…",
+    "teleological": "GPT-4o  |  Monitoring driving events…",
+}
+COLOR_DIM_IDLE = (120, 120, 120)   # grey for idle subtitle text
+
 # Output codec
 FOURCC = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -91,6 +98,9 @@ _HUD_SAFETY_CLASSES = {
 # ---------------------------------------------------------------------------
 # Data preparation helpers
 # ---------------------------------------------------------------------------
+
+_VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "van"}
+
 
 def _build_frame_yolo_map(detections: list[dict]) -> dict[int, list[str]]:
     """
@@ -121,6 +131,15 @@ def _build_frame_yolo_map(detections: list[dict]) -> dict[int, list[str]]:
     }
 
 
+def _build_frame_vehicle_map(detections: list[dict]) -> dict[int, bool]:
+    """Return set of frame indices where a vehicle (car/truck/bus/motorcycle) was detected."""
+    result: dict[int, bool] = {}
+    for d in detections:
+        if d["class_name"] in _VEHICLE_CLASSES:
+            result[d["frame_idx"]] = True
+    return result
+
+
 def _derive_action_state(snap: dict) -> str:
     """Derive human-readable action state from a telemetry snapshot."""
     brake    = snap.get("brake",    0.0)
@@ -133,6 +152,45 @@ def _derive_action_state(snap: dict) -> str:
     if throttle > 0.50:
         return "ACCELERATING"
     return "CRUISING"
+
+
+def _derive_action_text(snap: dict, yolo_labels: list[str],
+                        has_vehicle: bool = False) -> str:
+    """
+    Always-on short action label for the bottom bar.
+    Derived per-frame from telemetry + current YOLO labels.
+
+    has_vehicle: True if YOLO detected a car/truck/bus in this frame (passed
+                 separately because vehicles are filtered from HUD labels).
+    """
+    action         = _derive_action_state(snap)
+    brake          = snap.get("brake", 0.0)
+    steer          = snap.get("steer", 0.0)
+    has_pedestrian = "Pedestrian"    in yolo_labels
+    has_cyclist    = "Cyclist"       in yolo_labels
+    has_tl         = "Traffic Light" in yolo_labels
+
+    if action == "BRAKING":
+        prefix = "Emergency brake!" if brake >= 0.8 else "Braking."
+        if has_pedestrian:
+            return f"{prefix} Pedestrian ahead."
+        if has_cyclist:
+            return f"{prefix} Cyclist ahead."
+        if has_vehicle:
+            return f"{prefix} Vehicle ahead."
+        if has_tl:
+            return f"{prefix} Red light."
+        return prefix
+
+    if action == "ACCELERATING":
+        return "Accelerating. Green light." if has_tl else "Accelerating."
+
+    if action == "TURNING":
+        return "Turning right." if steer > 0 else "Turning left."
+
+    if has_pedestrian:
+        return "Pedestrian nearby. Monitoring."
+    return "Cruising."
 
 
 def _build_timestamp_index(telemetry: list[dict]) -> list[float]:
@@ -259,10 +317,11 @@ def _draw_speed_box(frame: np.ndarray, speed_kmh: float, action_state: str) -> i
     return box_x2
 
 
-def _draw_explanation(frame: np.ndarray, text: str, x_start: int) -> None:
+def _draw_explanation(frame: np.ndarray, text: str, x_start: int, idle: bool = False) -> None:
     """
     Semi-transparent box with word-wrapped, centred explanation text.
     Positioned in the bottom 20% of the frame, starting at x_start.
+    When idle=True the text is rendered in a dimmed colour.
     Modifies frame in-place.
     """
     if not text:
@@ -286,15 +345,17 @@ def _draw_explanation(frame: np.ndarray, text: str, x_start: int) -> None:
     box_y2   = h - EXPL_PAD_Y // 2
     box_y1   = max(area_top, box_y2 - block_h)
 
-    _semi_rect(frame, box_x1, box_y1, box_x2, box_y2, HUD_ALPHA)
+    alpha = HUD_ALPHA * 0.6 if idle else HUD_ALPHA
+    _semi_rect(frame, box_x1, box_y1, box_x2, box_y2, alpha)
 
+    text_color = COLOR_DIM_IDLE if idle else COLOR_WHITE
     text_y = box_y1 + EXPL_PAD_Y + lh
     for line in lines:
         (tw, _), _ = cv2.getTextSize(line, FONT, EXPL_SCALE, EXPL_THICK)
         text_x = box_x1 + max((box_w - tw) // 2, 0)   # centre each line
         cv2.putText(
             frame, line, (text_x, text_y),
-            FONT, EXPL_SCALE, COLOR_WHITE, EXPL_THICK, cv2.LINE_AA,
+            FONT, EXPL_SCALE, text_color, EXPL_THICK, cv2.LINE_AA,
         )
         text_y += lh + EXPL_LINE_GAP
 
@@ -303,32 +364,41 @@ def _draw_hud(
     frame:        np.ndarray,
     telemetry:    dict,
     yolo_labels:  list[str],
-    explanation:  str,
+    explanation:  str,        # kept for API compatibility, unused now
+    condition:    str = "",   # kept for API compatibility, unused now
 ) -> np.ndarray:
     """
     Compose all HUD elements onto a copy of frame and return it.
-    Drawing order: explanation first (bottom), then speed box (on top), then top bar.
+
+    Layout (all conditions):
+      TOP          — YOLO detected objects
+      BOTTOM LEFT  — speedometer + action state
+      BOTTOM CENTRE — condition-specific text (see below)
+
+    none:          no bottom text
+    template:      always-on latched short action text (passed as explanation)
+    descriptive/teleological: GPT-4o text shown only at trigger moments
     """
     out = frame.copy()
 
-    # 1. Explanation text (bottom centre) — drawn first so speed box sits on top
     speed_kmh    = telemetry.get("speed_kmh", 0.0)
     action_state = _derive_action_state(telemetry)
 
-    # Estimate speed box right edge for x_start without actually drawing yet
     p = SPEED_BOX_PAD
     m = SPEED_BOX_MARGIN
     speed_str = f"{int(round(speed_kmh))} km/h"
     (sw, _), _ = cv2.getTextSize(speed_str, FONT, SPEED_SCALE, SPEED_THICK)
     (aw, _), _ = cv2.getTextSize(action_state, FONT, STATE_SCALE, STATE_THICK)
-    estimated_box_right = m + max(sw, aw) + p * 2
+    box_right = m + max(sw, aw) + p * 2
 
-    _draw_explanation(out, explanation, estimated_box_right)
+    # 1. Bottom-centre text — condition-specific
+    if condition != "none" and explanation:
+        _draw_explanation(out, explanation, box_right, idle=False)
 
     # 2. Speed / action state box (bottom left)
     _draw_speed_box(out, speed_kmh, action_state)
 
-    # 3. Top bar (rendered last so it sits on top of everything)
+    # 3. YOLO detected objects (top bar)
     _draw_top_bar(out, yolo_labels)
 
     return out
@@ -339,15 +409,16 @@ def _draw_hud(
 # ---------------------------------------------------------------------------
 
 def _render_condition(
-    cap:            cv2.VideoCapture,
-    out_path:       Path,
-    fps:            float,
-    frame_size:     tuple[int, int],
-    frame_text_map: dict[int, str],
-    telemetry:      list[dict],
-    frame_yolo_map: dict[int, list[str]],
-    condition:      str,
-    total_frames:   int,
+    cap:               cv2.VideoCapture,
+    out_path:          Path,
+    fps:               float,
+    frame_size:        tuple[int, int],
+    frame_text_map:    dict[int, str],
+    telemetry:         list[dict],
+    frame_yolo_map:    dict[int, list[str]],
+    frame_vehicle_map: dict[int, bool],
+    condition:         str,
+    total_frames:      int,
 ) -> None:
     writer = cv2.VideoWriter(str(out_path), FOURCC, fps, frame_size)
     if not writer.isOpened():
@@ -362,17 +433,40 @@ def _render_condition(
         ncols=72,
         leave=True,
     ) as pbar:
+        # Latch state for template condition — prevents per-frame flicker
+        last_action_text  = ""
+        action_text_count = 0
+        LATCH_FRAMES      = 8   # frames a new state must hold before switching (~0.27s)
+
         frame_idx = 0
         while True:
             ret, raw = cap.read()
             if not ret:
                 break
 
-            snap       = telemetry[frame_idx] if frame_idx < len(telemetry) else {}
-            yolo_lbls  = frame_yolo_map.get(frame_idx, [])
-            expl_text  = frame_text_map.get(frame_idx, "")
+            snap        = telemetry[frame_idx] if frame_idx < len(telemetry) else {}
+            yolo_lbls   = frame_yolo_map.get(frame_idx, [])
+            has_vehicle = frame_vehicle_map.get(frame_idx, False)
 
-            out_frame = _draw_hud(raw, snap, yolo_lbls, expl_text)
+            if condition == "template":
+                candidate    = _derive_action_text(snap, yolo_lbls, has_vehicle)
+                is_emergency = snap.get("brake", 0.0) >= 0.8
+                if is_emergency:
+                    # Emergency: show immediately, reset latch
+                    last_action_text  = candidate
+                    action_text_count = 0
+                elif candidate != last_action_text:
+                    action_text_count += 1
+                    if action_text_count >= LATCH_FRAMES:
+                        last_action_text  = candidate
+                        action_text_count = 0
+                else:
+                    action_text_count = 0
+                expl_text = last_action_text
+            else:
+                expl_text = frame_text_map.get(frame_idx, "")
+
+            out_frame = _draw_hud(raw, snap, yolo_lbls, expl_text, condition)
             writer.write(out_frame)
 
             frame_idx += 1
@@ -419,10 +513,11 @@ def render_overlays(
             f"explanations/ not found in {scenario_dir}. Run generator.py first."
         )
 
-    telemetry      = json.loads(telemetry_path.read_text())
-    timestamps     = _build_timestamp_index(telemetry)
-    yolo_dets      = json.loads(yolo_path.read_text()) if yolo_path.exists() else []
-    frame_yolo_map = _build_frame_yolo_map(yolo_dets)
+    telemetry          = json.loads(telemetry_path.read_text())
+    timestamps         = _build_timestamp_index(telemetry)
+    yolo_dets          = json.loads(yolo_path.read_text()) if yolo_path.exists() else []
+    frame_yolo_map     = _build_frame_yolo_map(yolo_dets)
+    frame_vehicle_map  = _build_frame_vehicle_map(yolo_dets)
 
     if not yolo_path.exists():
         print("  WARNING: yolo_detections.json not found — top bar will be empty.")
@@ -458,7 +553,7 @@ def render_overlays(
         out_path = scenario_dir / f"video_{condition}.mp4"
         _render_condition(
             cap, out_path, fps, frame_size,
-            frame_text_map, telemetry, frame_yolo_map,
+            frame_text_map, telemetry, frame_yolo_map, frame_vehicle_map,
             condition, total_frames,
         )
 
