@@ -289,13 +289,21 @@ class AdaptTrustRunner:
         world.tick()
         CarlaDataProvider.on_carla_tick()
 
-        # Spawn ego at spawn_index
+        # Spawn ego at spawn_index, walked back 50 m for more approach road
         spawn_pts = world.get_map().get_spawn_points()
         spawn_t   = spawn_pts[self.spawn_index]
+        wp = world.get_map().get_waypoint(spawn_t.location)
+        prev_wps = wp.previous(50.0)
+        if prev_wps:
+            spawn_t = prev_wps[0].transform
+            spawn_t.location.z += 0.3
+            print(f"[runner] Ego backed up 50 m to x={spawn_t.location.x:.1f} y={spawn_t.location.y:.1f}")
+        else:
+            print(f"[runner] WARNING: no road behind spawn[{self.spawn_index}] — using original spawn")
         bp_lib    = world.get_blueprint_library()
         ego_bp    = bp_lib.find("vehicle.tesla.model3")
         ego       = world.spawn_actor(ego_bp, spawn_t)
-        print(f"[runner] Spawned ego id={ego.id} at spawn[{self.spawn_index}]")
+        print(f"[runner] Spawned ego id={ego.id} at x={spawn_t.location.x:.1f} y={spawn_t.location.y:.1f}")
 
         # Register ego with CarlaDataProvider so BasicAgentBehavior can look it up
         CarlaDataProvider.register_actor(ego, spawn_t)

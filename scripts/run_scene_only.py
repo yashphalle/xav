@@ -79,16 +79,24 @@ def main():
     world.tick()
     CarlaDataProvider.on_carla_tick()
 
-    # Spawn ego
+    # Spawn ego, walked back 50 m for more approach road
     spawn_pts = world.get_map().get_spawn_points()
     spawn_t   = spawn_pts[spawn_index]
+    wp = world.get_map().get_waypoint(spawn_t.location)
+    prev_wps = wp.previous(50.0)
+    if prev_wps:
+        spawn_t = prev_wps[0].transform
+        spawn_t.location.z += 0.3
+        print(f"[test] Ego backed up 50 m to x={spawn_t.location.x:.1f} y={spawn_t.location.y:.1f}")
+    else:
+        print(f"[test] WARNING: no road behind spawn[{spawn_index}] — using original spawn")
     ego_bp    = world.get_blueprint_library().find("vehicle.tesla.model3")
     ego       = world.spawn_actor(ego_bp, spawn_t)
     CarlaDataProvider.register_actor(ego, spawn_t)
     CarlaDataProvider._carla_actor_pool[ego.id] = ego
     world.tick()
     CarlaDataProvider.on_carla_tick()
-    print(f"[test] Spawned ego id={ego.id} at spawn[{spawn_index}]")
+    print(f"[test] Spawned ego id={ego.id} at x={spawn_t.location.x:.1f} y={spawn_t.location.y:.1f}")
 
     cfg      = AdaptTrustConfig()
     scenario = ScenCls([ego], cfg, world)

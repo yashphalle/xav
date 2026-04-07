@@ -117,6 +117,22 @@ class ForceEgoBrake(AtomicBehavior):
         return py_trees.common.Status.RUNNING
 
 
+class WaitUntilEgoClose(AtomicBehavior):
+    """SUCCESS when ego is within `distance` metres of a target location."""
+
+    def __init__(self, ego, target_location, distance=30.0, name="WaitUntilEgoClose"):
+        super().__init__(name, ego)
+        self._target = target_location
+        self._dist   = distance
+
+    def update(self):
+        loc = self._actor.get_location()
+        d   = loc.distance(self._target)
+        if d <= self._dist:
+            return py_trees.common.Status.SUCCESS
+        return py_trees.common.Status.RUNNING
+
+
 class KeepWalkerMoving(AtomicBehavior):
     """Apply WalkerControl every tick for a fixed number of ticks, then SUCCESS."""
 
@@ -1311,7 +1327,11 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
     def _do_initialize_actors(self, world):
         bp_lib = world.get_blueprint_library()
 
-        ego_t = self._ego().get_transform()
+        # Use the original map spawn point (index 0) as the fixed reference so
+        # NPC/pedestrian always spawn at their correct world positions even when
+        # the ego is started further back on the road.
+        spawn_pts = world.get_map().get_spawn_points()
+        ego_t = spawn_pts[0]
         fwd   = ego_t.get_forward_vector()
         right = ego_t.get_right_vector()
 
@@ -1338,8 +1358,8 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
             # so +2.5*right.x shifts the car ~2.5 m to the LEFT/west kerb).
             # Keep PARK_DIST ≤ 22 m — building wall blocks left-side spawns above ~25 m.
             PARK_DIST = 15.0
-            ego_wp    = world.get_map().get_waypoint(self._ego().get_location())
-            park_wps  = ego_wp.next(PARK_DIST)
+            origin_wp = world.get_map().get_waypoint(spawn_pts[0].location)
+            park_wps  = origin_wp.next(PARK_DIST)
             if park_wps:
                 wp      = park_wps[0]
                 # Use the oncoming (left) lane centre — well-defined CARLA position
@@ -1389,7 +1409,7 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
             return
 
         WALK_DIST = 22.0   # m ahead  (ego stops ~10m from spawn → ~12m gap to walker)
-        WALK_SIDE = -4.0   # m left   (spawn on left side, walks right across road)
+        WALK_SIDE = -8.0   # m left   (spawn on left side, walks right across road)
         walk_loc  = carla.Location(
             x=ego_t.location.x + WALK_DIST * fwd.x + WALK_SIDE * right.x,
             y=ego_t.location.y + WALK_DIST * fwd.y + WALK_SIDE * right.y,
@@ -1414,19 +1434,23 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
             print("[S1] WARNING: walker spawn failed")
 
     def _do_create_behavior(self):
-        from srunner.scenariomanager.timer import TimeOut as TOut
-
         ego  = self._ego()
         dest = self._dest()
         seq  = py_trees.composites.Sequence("S1_JaywalkingAdult")
 
-        # ---- Phase 1: warmup — ego accelerates to 25 km/h (2 s) ----
+        # ---- Phase 1: ego drives until it is within 30 m of the pedestrian ----
+        # Using distance trigger instead of fixed timer so it works regardless
+        # of how far back the ego spawns.
+        walker_loc = (self._walker.get_location()
+                      if getattr(self, "_walker", None) and self._walker.is_alive
+                      else ego.get_location())
         phase1 = py_trees.composites.Parallel(
             "S1_Phase1_Approach",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         phase1.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
                                                ignore_tl=True, name="S1_Drive1"))
-        phase1.add_child(TOut(2.0, name="S1_WarmupTimer"))
+        phase1.add_child(WaitUntilEgoClose(ego, walker_loc, distance=15.0,
+                                           name="S1_ApproachTrigger"))
         seq.add_child(phase1)
 
         walker_alive = getattr(self, "_walker", None) and self._walker.is_alive
@@ -1443,7 +1467,7 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
                                        name="S1_SoftBrake"))
         if walker_alive:
             phase2.add_child(KeepWalkerMoving(self._walker, self._walk_dir,
-                                              speed=1.4, ticks=70,
+                                              speed=4, ticks=70,
                                               name="S1_WalkerStep"))
         seq.add_child(phase2)
 
@@ -1451,7 +1475,7 @@ class S1_JaywalkingAdult(AdaptTrustScenario):
         # After Phase 2: walker is 0.9 m left of centre, needs ~1.6 m more to clear
         if walker_alive:
             seq.add_child(KeepWalkerMoving(self._walker, self._walk_dir,
-                                           speed=1.4, ticks=40,
+                                           speed=4, ticks=40,
                                            name="S1_WalkerClears"))
 
         # ---- Phase 4: ego resumes, runs until duration (20 s) ----
