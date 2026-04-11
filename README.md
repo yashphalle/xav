@@ -22,16 +22,23 @@
 
 ## Project Overview
 
-AdaptTrust records autonomous vehicle scenarios in CARLA and generates four explanation variants for each critical driving event. These videos are shown to study participants to measure how explanation type affects trust calibration.
+AdaptTrust records autonomous vehicle scenarios in CARLA, generates LLM-powered explanations for each critical driving event, and overlays them onto video. These videos are shown to study participants to measure how explanation type affects trust calibration.
 
-**Four explanation conditions:**
+**Three explanation conditions:**
 
 | # | Type | Description |
 |---|---|---|
 | 1 | None | No explanation shown (control) |
-| 2 | Template | Rule-based text, no API call |
-| 3 | LLM-Descriptive | GPT-4o factual description of what happened |
-| 4 | LLM-Teleological | GPT-4o goal-oriented explanation of why |
+| 2 | LLM-Descriptive | GPT-4o factual description of what the vehicle is about to do |
+| 3 | LLM-Teleological | GPT-4o goal-oriented explanation of why the vehicle is acting |
+
+**GPT-4o context per explanation:**
+- Every 4th trigger frame sent as images (multi-frame visual context)
+- Vehicle telemetry: speed, brake, throttle, steer
+- YOLO-detected objects with confidence scores
+- Traffic light state (inferred from YOLO + braking behaviour)
+- Nearest NPC: type, distance, speed (from `npc_telemetry.json`)
+- Anticipatory framing — explanation appears **2 seconds before** the action fires
 
 **Metrics:** Jian Trust Scale (12-item), Comprehension accuracy, Mental Model Quality (0–4, Cohen's κ > 0.70), NASA-TLX cognitive load.
 
@@ -48,7 +55,7 @@ AdaptTrust records autonomous vehicle scenarios in CARLA and generates four expl
 | Python | 3.10 | 3.10 |
 | NVIDIA Driver | 525+ | 580+ |
 
-> **RTX 5060 / Blackwell users:** Requires Ubuntu kernel 6.8+. MESA warnings about unknown PCI IDs are harmless — CARLA uses the NVIDIA proprietary driver, not Mesa. Do not use `client.load_world()` between scenarios (causes Signal 11 segfault); use `switch_town.sh` instead.
+> **RTX 5060 / Blackwell users:** Requires Ubuntu kernel 6.8+. MESA warnings about unknown PCI IDs are harmless — CARLA uses the NVIDIA proprietary driver, not Mesa.
 
 ---
 
@@ -140,107 +147,87 @@ python -c "from scripts.scenarios.adaptrust_scenarios import SCENARIO_REGISTRY; 
 
 ## Running the Pipeline
 
-Every scenario run produces four overlay videos (one per explanation condition), telemetry JSON, YOLO detections, and a pass/fail verdict.
+One command does everything: records the scenario, runs YOLO detection, calls GPT-4o for explanations, and renders all overlay videos.
 
-### Step 1 — Start CARLA on the right map
-
-Each scenario is pinned to a specific CARLA map. Use `switch_town.sh` to restart CARLA on the correct map (this avoids the Signal 11 segfault on Blackwell GPUs that happens with `load_world()`).
-
-```bash
-# Syntax: bash scripts/switch_town.sh <MapName>
-bash scripts/switch_town.sh Town04   # for H2, L2, M3
-bash scripts/switch_town.sh Town03   # for H3, L1, M1
-bash scripts/switch_town.sh Town02   # for H1, L3, M2
-```
-
-The script kills any running CARLA instance, launches a fresh one on the requested map, and polls until it's ready. Wait for the `[switch_town] CARLA ready` message before proceeding.
-
-Alternatively, start CARLA manually:
+### Terminal 1 — Start CARLA
 
 ```bash
 cd ~/carla
-./CarlaUE4.sh -quality-level=Low +Map=Town04
+./CarlaUE4.sh -quality-level=Low
 ```
 
-### Step 2 — Record a scenario
+For development/testing use `-quality-level=Low`. For final data collection use `-quality-level=Epic`.
 
-Open a second terminal:
+### Terminal 2 — Run a scenario
 
 ```bash
 conda activate carla-xav
 cd ~/xav
-python scripts/run_adaptrust.py --scenario <SCENARIO_ID> --run <N> --skip-map-reload
+python scripts/run_adaptrust.py --scenario <SCENARIO_ID> --run <N>
 ```
 
-`--skip-map-reload` is required when using `switch_town.sh` (which already loaded the map).
-
-**Examples:**
+CARLA will automatically load the correct map for the scenario. If it crashes on map switch (Blackwell GPU), start CARLA with the right map manually and add `--skip-map-reload`:
 
 ```bash
-python scripts/run_adaptrust.py --scenario H1_PedestrianDart   --run 1 --skip-map-reload
-python scripts/run_adaptrust.py --scenario H2_HighwayCutIn     --run 1 --skip-map-reload
-python scripts/run_adaptrust.py --scenario H3_RedLightRunner   --run 1 --skip-map-reload
-python scripts/run_adaptrust.py --scenario L1_GreenLightCruise --run 1 --skip-map-reload
+# Terminal 1: start on the right map
+./CarlaUE4.sh -quality-level=Low +Map=Town02
+
+# Terminal 2:
+python scripts/run_adaptrust.py --scenario S1_JaywalkingAdult --run 1 --skip-map-reload
 ```
 
-Output is written to `data/scenarios/<SCENARIO_ID>_run<N>/`.
+### What happens automatically
 
-### Step 3 — Check the verdict
+```
+record scenario
+    → YOLO detection on every frame
+    → trigger events logged (BRAKING, ACCELERATING, TURNING)
+    → trigger frames saved (JPEGs)
+    → GPT-4o called with frames + telemetry + NPC context
+    → explanations written (none.json, descriptive.json, teleological.json)
+    → 3 overlay videos rendered (video_none.mp4, video_descriptive.mp4, video_teleological.mp4)
+    → pass/fail verdict written
+```
 
-After each run, a verdict file is written automatically:
+### Check the verdict
 
 ```bash
-cat data/scenarios/H2_HighwayCutIn_run1/scenario_verdict.json
-```
-
-For HIGH criticality scenarios, this checks whether an emergency brake (≥ 0.8) actually fired:
-
-```json
-{
-  "scenario_id": "H2_HighwayCutIn",
-  "critical_event_required": "BRAKING",
-  "critical_event_fired": true,
-  "critical_event_count": 1,
-  "PASSED": true,
-  "note": "Emergency brake detected"
-}
+cat data/scenarios/H1_PedestrianDart_run1/scenario_verdict.json
 ```
 
 If `PASSED` is `false`, the critical event didn't fire — re-run on the correct map.
 
-### Step 4 — Inspect the run (optional)
+### Inspect a run (optional)
 
 ```bash
-python scripts/scene_logger.py data/scenarios/H2_HighwayCutIn_run1
+python scripts/scene_logger.py data/scenarios/H1_PedestrianDart_run1
 ```
 
-Prints a timestamped event log with speed, brake, YOLO detections, and all four explanation strings at each trigger point.
+Prints a timestamped event log with speed, brake, YOLO detections, and explanation strings at each trigger point.
 
 ---
 
 ## Scenarios
 
-All 9 scenarios, their maps, and what the critical event is:
+13 scenarios across 4 maps:
 
 | ID | Map | Criticality | Critical Event | Description |
 |---|---|---|---|---|
 | L1_GreenLightCruise | Town03 | LOW | — | Cruise at 40 km/h through all-green lights |
 | L2_SlowLeadOvertake | Town04 | LOW | — | Slow lead vehicle at ~20 km/h; ego follows |
-| L3_NarrowStreetNav | Town02 | LOW | — | Navigate past 4 parked cars at 20 km/h |
-| M1_YellowLightStop | Town03 | MEDIUM | — | TL turns yellow at t=8 s; ego soft-brakes |
-| M2_CrosswalkYield | Town02 | MEDIUM | — | Pedestrian crosses; ego yields |
-| M3_HighwayMergeYield | Town04 | MEDIUM | — | NPC merges from left; ego yields |
+| L3_NarrowStreetNav | Town02 | LOW | — | Navigate past parked cars at 20 km/h |
+| M1_YellowLightStop | Town03 | MEDIUM | BRAKING | TL turns yellow; ego soft-brakes |
+| M2_CrosswalkYield | Town02 | MEDIUM | BRAKING | Pedestrian crosses; ego yields |
+| M3_HighwayMergeYield | Town04 | MEDIUM | BRAKING | NPC merges from left; ego yields |
 | H1_PedestrianDart | Town02 | HIGH | BRAKING | Child darts into road; ego emergency-brakes |
-| H2_HighwayCutIn | Town04 | HIGH | BRAKING | NPC catches up from behind and cuts in; ego emergency-brakes |
+| H2_HighwayCutIn | Town04 | HIGH | BRAKING | NPC cuts in from behind; ego emergency-brakes |
 | H3_RedLightRunner | Town03 | HIGH | BRAKING | NPC runs red from cross street; ego emergency-brakes |
+| S1_JaywalkingAdult | Town02 | HIGH | BRAKING | Adult jaywalks mid-block; ego emergency-brakes |
+| S2_SuddenStopEvasion | Town04 | HIGH | BRAKING | Lead vehicle stops suddenly; ego evades |
+| S4_EmergencyVehiclePullOver | Town02 | HIGH | TURNING | Emergency vehicle approaches; ego pulls over |
+| S5_HiddenCyclist | Town02 | HIGH | BRAKING | Cyclist emerges from blind spot; ego emergency-brakes |
 
-**Map → scenario mapping:**
-
-| Map | Scenarios |
-|---|---|
-| Town02 | H1, L3, M2 |
-| Town03 | H3, L1, M1 |
-| Town04 | H2, L2, M3 |
+**Final 5 scenarios used in study:** S1, S2, S4, S5, L3
 
 ---
 
@@ -249,32 +236,41 @@ All 9 scenarios, their maps, and what the critical event is:
 ```
 xav/
 ├── README.md
-├── CLAUDE.md                          # Dev notes for Claude Code
 ├── carla-xav-environment.yml          # Conda environment lock file
 ├── .env.example                       # API key template
 ├── .gitignore
 │
 ├── scripts/
-│   ├── run_adaptrust.py               # Entry point — run any scenario from CLI
-│   ├── adaptrust_runner.py            # Core runner: spawns ego, sensors, tick loop
+│   ├── run_adaptrust.py               # Entry point — one command runs full pipeline
+│   ├── adaptrust_runner.py            # Core runner: spawns ego, sensors, tick loop,
+│   │                                  #   calls explanation generator + overlay renderer
 │   ├── scene_logger.py                # Diagnostic: print event log for a recorded run
-│   ├── switch_town.sh                 # Kill + restart CARLA on a new map safely
 │   │
 │   ├── scenarios/
-│   │   └── adaptrust_scenarios.py     # All 9 scenario classes + SCENARIO_REGISTRY
+│   │   └── adaptrust_scenarios.py     # All 13 scenario classes + SCENARIO_REGISTRY
 │   │
 │   ├── data_collection/
-│   │   └── recorder.py                # RGB recording, YOLO detection, trigger logging
+│   │   └── recorder.py                # RGB recording, YOLO detection, trigger logging,
+│   │                                  #   NPC telemetry, trigger frame capture
 │   │
 │   ├── explanation_gen/
-│   │   └── generator.py               # GPT-4o calls → 4 explanation variants per event
+│   │   └── generator.py               # GPT-4o multi-frame calls → 3 explanation variants
+│   │                                  #   (none, descriptive, teleological)
 │   │
-│   └── video_pipeline/
-│       └── overlay.py                 # OpenCV HUD overlay → 4 output videos
+│   ├── video_pipeline/
+│   │   └── overlay.py                 # OpenCV HUD overlay → 3 output videos
+│   │                                  #   explanations displayed 2s before trigger event
+│   │
+│   └── audio_pipeline/
+│       └── synthesizer.py             # TTS voiceover + engine noise added to videos
+│
+├── survey/                            # Next.js survey webapp (Supabase backend)
+│   │                                  #   Jian Trust Scale, NASA-TLX, comprehension,
+│   │                                  #   consent, demographics
+│   └── ...
 │
 ├── data/
-│   ├── scenarios/                     # Recorded runs (not in git — too large)
-│   └── explanations/                  # Cached explanation text
+│   └── scenarios/                     # Recorded runs (not in git — too large)
 │
 ├── analysis/
 │   ├── survey/                        # Qualtrics survey design
@@ -291,17 +287,19 @@ Each `data/scenarios/<SCENARIO_ID>_run<N>/` directory contains:
 
 | File | Description |
 |---|---|
-| `video.mp4` | Raw 1920×1080 recording at 30 fps |
+| `video.mp4` | Raw 1920×1080 recording |
 | `telemetry.json` | Per-frame: speed, throttle, brake, steer, position |
 | `npc_telemetry.json` | Per-frame position and speed of each NPC |
-| `action_events.json` | Trigger events (BRAKING, ACCELERATING, etc.) with telemetry snapshots |
-| `scenario_verdict.json` | Pass/fail based on whether the critical event fired |
-| `trigger_frames/` | JPEG screenshots at each trigger point (sent to GPT-4o) |
-| `explanations/` | JSON files for each of the 4 explanation conditions |
+| `yolo_detections.json` | Per-frame YOLO detections with class, confidence, bbox |
+| `action_events.json` | Trigger events with telemetry snapshots and frame paths |
+| `scenario_verdict.json` | Pass/fail — whether the critical event fired |
+| `trigger_frames/` | JPEG screenshots around each trigger (sent to GPT-4o) |
+| `explanations/none.json` | Control condition — empty explanations |
+| `explanations/descriptive.json` | GPT-4o factual descriptions |
+| `explanations/teleological.json` | GPT-4o goal-oriented explanations |
 | `video_none.mp4` | Overlay video — no explanation |
-| `video_template.mp4` | Overlay video — template explanation |
-| `video_descriptive.mp4` | Overlay video — LLM descriptive explanation |
-| `video_teleological.mp4` | Overlay video — LLM teleological explanation |
+| `video_descriptive.mp4` | Overlay video — LLM descriptive |
+| `video_teleological.mp4` | Overlay video — LLM teleological |
 
 ---
 
@@ -313,23 +311,23 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | For LLM conditions only | GPT-4o API key. Without it, descriptive and teleological conditions get placeholder text instead of real explanations. |
+| `OPENAI_API_KEY` | For LLM conditions only | GPT-4o API key. Without it, descriptive and teleological conditions get placeholder text. |
 
 ---
 
 ## Git Workflow
 
-Feature-branch model — never push directly to `main`.
+Both contributors push to `main`. Always pull before starting work:
 
 ```bash
-git checkout -b feature/my-change
+git pull origin main
+# make changes
 git add <files>
-git commit -m "short description of what changed"
-git push origin feature/my-change
-# open PR on GitHub, get one review, then merge
+git commit -m "short description"
+git push origin main
 ```
 
-Branch prefixes: `feature/`, `fix/`, `data/`, `analysis/`
+If there are conflicts, give priority to scenario scripts from the person who owns that scenario.
 
 ---
 
@@ -338,10 +336,9 @@ Branch prefixes: `feature/`, `fix/`, `data/`, `analysis/`
 | Issue | Notes |
 |---|---|
 | MESA warning `Driver does not support 0x7d67 PCI ID` | Harmless on RTX 5060. CARLA uses NVIDIA driver, not Mesa. |
-| `client.load_world()` causes Signal 11 segfault | RTX 5060 / Blackwell only. Use `switch_town.sh` instead. |
+| `client.load_world()` causes Signal 11 segfault | RTX 5060 / Blackwell only. Start CARLA with `+Map=<Town>` and use `--skip-map-reload`. |
 | `nvidia-smi` shows CUDA 13.0, `nvcc` shows 11.5 | Irrelevant — project uses conda-managed CUDA. |
 | CARLA 0.9.15 GitHub download links broken | Use the Backblaze URL in Setup Step 5. |
-| `No module named 'carla'` in switch_town.sh | Script uses the conda env python. Make sure `~/miniconda3/envs/carla-xav/bin/python` exists. |
 
 ---
 
