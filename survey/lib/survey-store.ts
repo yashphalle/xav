@@ -1,4 +1,4 @@
-import type { SurveyData } from '@/types/survey'
+import type { SurveyData, ScenarioResponseData } from '@/types/survey'
 
 const KEY = 'av_survey_v1'
 
@@ -21,4 +21,28 @@ export function setSurvey(data: Partial<SurveyData>): void {
 export function clearSurvey(): void {
   if (typeof window === 'undefined') return
   localStorage.removeItem(KEY)
+}
+
+// ─── Per-scenario helpers ────────────────────────────────────────────────────
+
+/** Get stored data for a specific scenario display index (0-4) */
+export function getScenarioData(
+  scenarioIndex: number
+): Partial<ScenarioResponseData> {
+  const survey = getSurvey()
+  return survey.scenarios?.[scenarioIndex] ?? {}
+}
+
+/** Merge data into the stored record for a specific scenario display index */
+export function setScenarioData(
+  scenarioIndex: number,
+  data: Partial<ScenarioResponseData>
+): void {
+  if (typeof window === 'undefined') return
+  const survey = getSurvey()
+  const scenarios: Partial<ScenarioResponseData>[] = survey.scenarios
+    ? [...survey.scenarios]
+    : []
+  scenarios[scenarioIndex] = { ...scenarios[scenarioIndex], ...data }
+  setSurvey({ scenarios })
 }

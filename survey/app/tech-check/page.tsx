@@ -58,7 +58,6 @@ export default function TechCheckPage() {
               </label>
             ))}
           </div>
-          {errors.desktop && <p className="field-error">{errors.desktop.message}</p>}
         </div>
 
         {/* Q2 */}
@@ -82,7 +81,6 @@ export default function TechCheckPage() {
               </label>
             ))}
           </div>
-          {errors.audio_ok && <p className="field-error">{errors.audio_ok.message}</p>}
         </div>
 
         <div className="pt-2">

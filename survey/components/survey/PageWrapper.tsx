@@ -1,14 +1,38 @@
 'use client'
 
+interface ScenarioInfo {
+  current: number   // 1-indexed scenario number
+  total: number     // total scenarios
+  stepNum: number   // step within scenario (1-indexed)
+  totalSteps: number
+}
+
 interface PageWrapperProps {
   title: string
-  step?: number      // current step number (shown in progress bar)
+  step?: number
   totalSteps?: number
+  scenarioInfo?: ScenarioInfo
   children: React.ReactNode
 }
 
-export default function PageWrapper({ title, step, totalSteps, children }: PageWrapperProps) {
-  const pct = step && totalSteps ? Math.round((step / totalSteps) * 100) : null
+export default function PageWrapper({
+  title,
+  step,
+  totalSteps,
+  scenarioInfo,
+  children,
+}: PageWrapperProps) {
+  const pct = step && totalSteps
+    ? Math.round((step / totalSteps) * 100)
+    : scenarioInfo
+    ? Math.round((scenarioInfo.current / scenarioInfo.total) * 100)
+    : null
+
+  const stepLabel = scenarioInfo
+    ? `Scenario ${scenarioInfo.current} of ${scenarioInfo.total} · Step ${scenarioInfo.stepNum} of ${scenarioInfo.totalSteps}`
+    : step && totalSteps
+    ? `Step ${step} of ${totalSteps}`
+    : null
 
   return (
     <div className="min-h-screen bg-gray-50 py-8 px-4">
@@ -16,9 +40,7 @@ export default function PageWrapper({ title, step, totalSteps, children }: PageW
         {/* Header */}
         <div className="flex items-center justify-between text-xs text-gray-400">
           <span>Northeastern University · CS 6170</span>
-          {step && totalSteps && (
-            <span>Step {step} of {totalSteps}</span>
-          )}
+          {stepLabel && <span>{stepLabel}</span>}
         </div>
 
         {/* Progress bar */}

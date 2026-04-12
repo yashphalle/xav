@@ -27,7 +27,7 @@ export default function InstructionsPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ participant_id: getSurvey().participant_id, ac1, attn_fail_1 }),
     }).catch(console.error)
-    router.push('/video')
+    router.push('/scenario/0/video')
   }
 
   return (
@@ -57,21 +57,20 @@ export default function InstructionsPage() {
               </label>
             ))}
           </div>
-          {errors.ac1 && <p className="field-error">{String(errors.ac1.message)}</p>}
         </div>
 
         {/* Video instructions */}
         <div className="space-y-3">
           <h2 className="section-title text-base">Video Task Instructions</h2>
           <p className="text-sm text-gray-600">
-            You are about to watch <strong>2 short driving clips</strong> showing an autonomous
-            vehicle making a driving decision.
+            You are about to watch <strong>5 short driving clips</strong> showing an autonomous
+            vehicle in different situations. You will answer questions after each clip.
           </p>
           <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-700 space-y-1 border border-gray-200">
-            <p className="font-medium mb-2">For the clip you will:</p>
+            <p className="font-medium mb-2">For each clip you will:</p>
             <ol className="list-decimal list-inside space-y-1 ml-1">
               <li>Watch the full video (Continue button appears only when it ends)</li>
-              <li>Answer questions about what you saw</li>
+              <li>Answer comprehension questions about what you saw</li>
               <li>Rate your experience and share your thoughts</li>
             </ol>
             <div className="mt-3 pt-3 border-t border-gray-200 space-y-1">
@@ -86,7 +85,7 @@ export default function InstructionsPage() {
         </div>
 
         <div className="pt-2">
-          <button type="submit" className="btn-primary">I Understand — Start Video →</button>
+          <button type="submit" className="btn-primary">I Understand, Start →</button>
         </div>
       </form>
     </PageWrapper>

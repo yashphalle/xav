@@ -16,8 +16,8 @@ const LICENSE_OPTIONS = ['Yes', 'No']
 const DRIVE_YEARS_OPTIONS = ['0 (do not drive)', '1–5 years', '6–15 years', '16+ years']
 const DRIVE_FREQ_OPTIONS = ['Daily', 'A few times a week', 'Rarely', 'Never']
 const AV_EXP_OPTIONS = [
-  'Yes — fully autonomous (e.g., Waymo)',
-  'Yes — semi-autonomous (e.g., Tesla Autopilot)',
+  'Yes, fully autonomous (e.g., Waymo)',
+  'Yes, semi-autonomous (e.g., Tesla Autopilot)',
   'No',
 ]
 
@@ -61,7 +61,6 @@ function RadioGroup({
           </label>
         ))}
       </div>
-      {error && <p className="field-error">{error.message}</p>}
     </div>
   )
 }
@@ -116,7 +115,6 @@ export default function DemographicsPage() {
               {avFamiliarity ?? 4} / 7
             </p>
           </div>
-          {errors.av_familiarity && <p className="field-error">{errors.av_familiarity.message}</p>}
         </div>
 
         <div className="pt-2">

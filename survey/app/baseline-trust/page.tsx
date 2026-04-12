@@ -39,15 +39,13 @@ export default function BaselineTrustPage() {
     router.push('/instructions')
   }
 
-  const hasErrors = Object.keys(errors).length > 0
-
   return (
     <PageWrapper title="General Attitudes" step={2} totalSteps={10}>
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
 
         {/* Section A — Propensity to Trust */}
         <div>
-          <p className="section-title">Section A — Trust in Machines</p>
+          <p className="section-title">Section A: Trust in Machines</p>
           <p className="section-note">
             Rate how much you agree with each statement.&nbsp;
             <strong>1 = Strongly Disagree &nbsp;·&nbsp; 5 = Strongly Agree</strong>
@@ -63,7 +61,7 @@ export default function BaselineTrustPage() {
 
         {/* Section B — AV Attitudes */}
         <div>
-          <p className="section-title">Section B — Autonomous Vehicle Attitudes</p>
+          <p className="section-title">Section B: Autonomous Vehicle Attitudes</p>
           <p className="section-note">
             Rate your agreement before watching any clips.&nbsp;
             <strong>1 = Strongly Disagree &nbsp;·&nbsp; 7 = Strongly Agree</strong>
@@ -76,10 +74,6 @@ export default function BaselineTrustPage() {
             errors={errors}
           />
         </div>
-
-        {hasErrors && (
-          <p className="text-red-600 text-sm">Please answer all items before continuing.</p>
-        )}
 
         <div className="pt-2">
           <button type="submit" className="btn-primary">Continue →</button>

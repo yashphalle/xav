@@ -2,20 +2,21 @@
 import { useRouter } from 'next/navigation'
 import { v4 as uuidv4 } from 'uuid'
 import { setSurvey } from '@/lib/survey-store'
+import { CONDITIONS, shuffleIndices, SCENARIOS } from '@/lib/scenarios'
 import Image from 'next/image'
 
 const SECTIONS = [
   {
     label: 'Purpose',
-    text: 'This study investigates whether AI-generated explanations of autonomous vehicle actions improve passenger trust and understanding of vehicle decisions. The full purpose will be explained at the end.',
+    text: 'We are studying how explanations of autonomous vehicle actions affect passenger trust and understanding. The full purpose will be explained at the end.',
   },
   {
     label: 'Procedures',
-    text: 'You will watch a short simulated driving clip and answer questions about it. The study takes approximately 10–15 minutes.',
+    text: 'You will watch 5 short simulated driving clips showing an autonomous vehicle in different situations, and answer questions after each clip. The study takes approximately 20–25 minutes.',
   },
   {
     label: 'Risks',
-    text: 'Minimal risk. The clip depicts an autonomous vehicle making a sudden braking decision and may be mildly surprising.',
+    text: 'Minimal risk. The clips depict an autonomous vehicle navigating various driving situations and may be mildly surprising.',
   },
   {
     label: 'Confidentiality',
@@ -37,11 +38,13 @@ export default function ConsentPage() {
   function handleAgree() {
     const participant_id = uuidv4()
     const start_time = new Date().toISOString()
-    setSurvey({ participant_id, start_time, condition: 'vlm_descriptive' })
+    const condition = CONDITIONS[Math.floor(Math.random() * CONDITIONS.length)]
+    const scenario_order = shuffleIndices(SCENARIOS.length)
+    setSurvey({ participant_id, start_time, condition, scenario_order })
     fetch('/api/response', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ participant_id, start_time, condition: 'vlm_descriptive' }),
+      body: JSON.stringify({ participant_id, start_time, condition, scenario_order }),
     }).catch(console.error)
     router.push('/tech-check')
   }
@@ -83,17 +86,9 @@ export default function ConsentPage() {
       <div className="flex-1 flex justify-center px-4 py-8">
         <div className="w-full max-w-2xl space-y-5">
 
-          {/* PI + link */}
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          {/* PI */}
+          <div className="text-xs text-slate-500">
             <span>Meet Jain &amp; Yash Phalle</span>
-            <a
-              href="https://github.com/Meetjain-0201/xav"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-slate-300 transition-colors underline underline-offset-2"
-            >
-              github.com/Meetjain-0201/xav
-            </a>
           </div>
 
           {/* Consent card */}

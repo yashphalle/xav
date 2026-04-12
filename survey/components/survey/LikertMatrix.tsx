@@ -34,13 +34,10 @@ export default function LikertMatrix({
         <tbody>
           {items.map((item, idx) => {
             const name = `${namePrefix}${idx + 1}`
-            const hasError = !!errors?.[name]
             return (
               <tr
                 key={idx}
-                className={`border-b border-gray-100 ${
-                  hasError ? 'bg-red-50' : idx % 2 === 1 ? 'bg-gray-50/60' : ''
-                }`}
+                className={`border-b border-gray-100 ${idx % 2 === 1 ? 'bg-gray-50/60' : ''}`}
               >
                 <td className="py-3 pr-4 text-gray-700 leading-snug">
                   {idx + 1}.&nbsp;{item}
