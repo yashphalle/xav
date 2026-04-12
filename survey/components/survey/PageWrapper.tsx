@@ -48,7 +48,9 @@ export default function PageWrapper({
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.back()}
-              className="hover:text-gray-600 transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+                         bg-gray-200 hover:bg-gray-300 text-gray-700 hover:text-gray-900
+                         text-xs font-medium transition-colors"
             >
               ← Back
             </button>

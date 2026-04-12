@@ -6,26 +6,17 @@ import { getSurvey, setScenarioData, getScenarioData } from '@/lib/survey-store'
 import { nextScenarioPath, scenarioStepNumber, TOTAL_SCENARIO_STEPS, TOTAL_SCENARIOS } from '@/lib/scenario-nav'
 import PageWrapper from '@/components/survey/PageWrapper'
 
-// Jian et al. (2000) Trust in Automation scale — 12 items, 1-7
-// Items 1-5: distrust factor (reverse scored for composite)
-// Items 6-12: trust factor
+// Jian et al. (2000) Trust in Automation scale — 7-item trust subscale only (items 6–12)
+// Distrust subscale (items 1–5) omitted; trust subscale used standalone per Körber (2019)
 const JIAN_ITEMS = [
-  { id: 1,  text: 'The system is deceptive.',                             reverse: true  },
-  { id: 2,  text: 'The system behaves in an underhanded manner.',         reverse: true  },
-  { id: 3,  text: "I am suspicious of the system's intent or output.",    reverse: true  },
-  { id: 4,  text: 'I am wary of the system.',                             reverse: true  },
-  { id: 5,  text: "The system's action will have a harmful outcome.",     reverse: true  },
-  { id: 6,  text: 'I am confident in the system.',                        reverse: false },
-  { id: 7,  text: 'The system provides security.',                        reverse: false },
-  { id: 8,  text: 'The system has integrity.',                            reverse: false },
-  { id: 9,  text: 'The system is dependable.',                            reverse: false },
-  { id: 10, text: 'The system is reliable.',                              reverse: false },
-  { id: 11, text: 'I can trust the system.',                              reverse: false },
-  { id: 12, text: 'I am familiar with the system.',                       reverse: false },
+  { id: 6,  text: 'I am confident in the system.'   },
+  { id: 7,  text: 'The system provides security.'   },
+  { id: 8,  text: 'The system has integrity.'        },
+  { id: 9,  text: 'The system is dependable.'        },
+  { id: 10, text: 'The system is reliable.'          },
+  { id: 11, text: 'I can trust the system.'          },
+  { id: 12, text: 'I am familiar with the system.'  },
 ]
-
-const DISTRUST_ITEMS = JIAN_ITEMS.filter(i => i.reverse)   // items 1-5
-const TRUST_ITEMS    = JIAN_ITEMS.filter(i => !i.reverse)  // items 6-12
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr]
@@ -46,36 +37,27 @@ export default function JianTrustStep({ scenarioIndex, condition }: { scenarioIn
 
   useEffect(() => {
     const existing = getScenarioData(scenarioIndex).jian_order
-    if (existing && existing.length === 12) {
+    if (existing && existing.length === 7) {
       setOrderedItems(existing.map((i) => JIAN_ITEMS[i]))
     } else {
-      const shuffled = shuffle([...Array(12).keys()])
+      const shuffled = shuffle([...Array(7).keys()])
       setScenarioData(scenarioIndex, { jian_order: shuffled })
       setOrderedItems(shuffled.map((i) => JIAN_ITEMS[i]))
     }
   }, [scenarioIndex])
 
   async function onSubmit(data: any) {
-    // Parse all Jian responses
+    // Parse 7-item trust subscale responses (ids 6–12)
     const jianVals: Record<string, number> = {}
     for (const item of JIAN_ITEMS) {
       jianVals[`jian${item.id}`] = parseInt(data[`jian${item.id}`], 10)
     }
 
-    // Composite (all 12, reversed where needed) — traditional Jian composite
-    const scores = JIAN_ITEMS.map((item) => {
-      const raw = jianVals[`jian${item.id}`]
-      return item.reverse ? 8 - raw : raw
-    })
-    const jian_composite = parseFloat((scores.reduce((a, b) => a + b, 0) / 12).toFixed(3))
-
-    // Trust factor mean (items 6-12, positive, no reversal)
-    const trustScores = TRUST_ITEMS.map(item => jianVals[`jian${item.id}`])
-    const jian_trust_mean = parseFloat((trustScores.reduce((a, b) => a + b, 0) / TRUST_ITEMS.length).toFixed(3))
-
-    // Distrust factor mean (items 1-5, reverse scored: higher raw = more distrust → keep raw for distrust score)
-    const distrustScores = DISTRUST_ITEMS.map(item => jianVals[`jian${item.id}`])
-    const jian_distrust_mean = parseFloat((distrustScores.reduce((a, b) => a + b, 0) / DISTRUST_ITEMS.length).toFixed(3))
+    // Trust mean — all 7 items are positive direction, no reversal needed
+    const scores = JIAN_ITEMS.map(item => jianVals[`jian${item.id}`])
+    const jian_trust_mean = parseFloat((scores.reduce((a, b) => a + b, 0) / 7).toFixed(3))
+    const jian_composite  = jian_trust_mean   // composite = trust subscale mean
+    const jian_distrust_mean = null            // distrust subscale not collected
 
     // Gyevnar calibration item
     const trust_calibration_item = parseInt(data.trust_calibration_item, 10)
@@ -132,7 +114,7 @@ export default function JianTrustStep({ scenarioIndex, condition }: { scenarioIn
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
 
-        {/* Jian 12-item trust scale */}
+        {/* Jian 7-item trust subscale */}
         <div className="overflow-x-auto">
           <table className="w-full min-w-[520px] text-sm">
             <thead>

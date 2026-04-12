@@ -33,12 +33,7 @@ export default function TechCheckPage() {
   const [tonePlayed, setTonePlayed] = useState(false)
 
   function onSubmit(data: FormData) {
-    if (data.device === 'mobile') {
-      setSurvey({ exclude_mobile: true })
-      router.push('/screen-out')
-      return
-    }
-
+    const isMobile = data.device === 'mobile'
     const survey = getSurvey()
     const payload = {
       participant_id:  survey.participant_id,
@@ -46,9 +41,9 @@ export default function TechCheckPage() {
       group_number:    survey.group_number,
       scenario_order:  survey.scenario_order,
       audio_ok:        data.audio_ok === 'yes',
-      exclude_mobile:  false,
+      exclude_mobile:  isMobile,
     }
-    setSurvey({ audio_ok: payload.audio_ok, exclude_mobile: false })
+    setSurvey({ audio_ok: payload.audio_ok, exclude_mobile: isMobile })
     fetch('/api/response', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -71,7 +66,8 @@ export default function TechCheckPage() {
           <div className="mt-2 space-y-2">
             {[
               { value: 'computer', label: 'Desktop or laptop computer' },
-              { value: 'mobile',   label: 'Mobile phone or tablet' },
+              { value: 'mobile',   label: 'Mobile phone or tablet'     },
+              { value: 'other',    label: 'Other'                      },
             ].map(({ value, label }) => (
               <label key={value} className="radio-row">
                 <input

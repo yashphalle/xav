@@ -119,7 +119,6 @@ export default function ConsentPage() {
                   <div className="text-slate-400 text-xs space-y-0.5">
                     <p>Meet Jain &amp; Yash Phalle</p>
                     <p>Northeastern University</p>
-                    <p className="text-slate-600">IRB Protocol: [XXXX]</p>
                   </div>
                 </div>
               </div>
