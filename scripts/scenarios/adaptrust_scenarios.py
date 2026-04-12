@@ -1668,36 +1668,53 @@ class S2_SuddenStopEvasion(AdaptTrustScenario):
 
 class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
     """
-    Town02 — Corner-first design.
+    Town02 — Corner-first design (run 1 update).
 
     Layout:
-      Ego       : spawn[0] (x≈-7.5, y≈142), heading north.
-      Ambulance : spawns ~30 m behind ego (max available road south of spawn[0]).
+      Ego        : spawn[0] (x≈-7.5, y≈142), heading north.
+      Ambulance  : spawns ~50 m behind ego (south of spawn[0]).
+      Parked car : ~60 m ahead of ego along road, offset ~3 m right onto the
+                   footpath — visible in front camera as ego approaches; the
+                   parked car is what limits/motivates where ego stops on the
+                   footpath.
 
     Phases:
-      Phase 0 (8 s): Ego drives north at 25 km/h through the Town02 junction
-              at y≈191 and turns onto the second northbound straight (x≈41).
-              Ambulance holds stationary (brake=1.0).  Gives ego a ~56 m head
-              start — it has cleared the corner before the ambulance launches.
+      Phase 0 (28 s): Ego + ambulance both drive north at 25 km/h through
+              Town02 junctions to the final eastbound straight (y≈240).
+              Ambulance follows at the same speed — maintains ~50 m gap,
+              visible in rear PiP the whole time.
 
-      Phase 1 (≤12 s trigger): Ambulance handed to TrafficManager at 2× speed
-              limit (~60 km/h) with ignore_vehicles=100% so it drives through
-              junctions without stopping.  Follows the same road path as ego.
-              Trigger fires when gap ≤ 35 m (both on second straight by then).
+      Phase 1 (≤20 s, trigger at 25 m gap): Ambulance accelerates to 60 km/h.
+              Gap closes from ~50 m to 25 m (≈2.6 s at 35 km/h relative).
+              Ambulance does NOT need to slow — by the time it reaches ego's
+              original lane position, ego has already moved onto the footpath.
 
-      Phase 2 (≤7 s): Ego steers right (east = +x on northbound road) for 20
-              ticks to gain curb clearance, then hard-brakes.  Ambulance
-              continues under TM and passes on the left.
+      Phase 2 (≤12 s):
+              Ego — PullToCurb:
+                Phase A (steer=+1.0, 40 ticks = 2 s): hard right drift with
+                  zero brake; ego slides quickly south toward footpath.
+                Phase B (steer=+0.80, brake=0.90, 80 ticks = 4 s): sustained
+                  right steer + hard brake; ego stops deep on footpath, well
+                  clear of the travel lane.
+              Ambulance — AmbulanceDodgeAndPass:
+                Drives at 60 km/h via BasicAgent (stays on road centre).
+                When ego's lateral offset from road centre exceeds 1.5 m AND
+                ambulance is within 20 m longitudinally, a brief left steer
+                nudge (+0.14 for 25 ticks) makes the avoidance visually
+                explicit: ambulance moves left of centre to clear the
+                half-on-footpath ego.  BasicAgent routing then straightens it.
+              WaitUntilAhead(x+20) ends phase once ambulance is 20 m clear.
 
-      Phase 3 (≤8 s): Ego resumes with BasicAgent. TOut ends scenario.
+      Phase 3 (≤8 s): Ego resumes with BasicAgent from curb position.
+              Ambulance continues east at 60 km/h.
 
-    Unexplainability: front camera shows clear road — the approaching
-      ambulance is only visible in the rear-view mirror.
+    Unexplainability: front camera shows clear road + the parked car ahead —
+      the approaching ambulance is only visible in the rear-view mirror.
 
     Trigger: BRAKING
     """
 
-    duration       = 35.0
+    duration       = 48.0
     target_speed   = 25.0
     critical_event = "BRAKING"
 
@@ -1706,12 +1723,13 @@ class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
         emerg_bps = [b for b in bp_lib.filter("vehicle.*") if "ambulance" in b.id]
         car_bps   = [b for b in bp_lib.filter("vehicle.*")
                      if b.get_attribute("number_of_wheels").as_int() == 4]
-        bp = emerg_bps[0] if emerg_bps else (car_bps[0] if car_bps
-                                              else bp_lib.filter("vehicle.*")[0])
+        amb_bp = emerg_bps[0] if emerg_bps else (car_bps[0] if car_bps
+                                                  else bp_lib.filter("vehicle.*")[0])
 
-        # Town02 spawn[0] southbound road only extends ~31 m before the
-        # map boundary.  Probe backwards in decreasing steps to find a valid
-        # spawn waypoint.
+        # ---- Ambulance: 50 m behind ego ----
+        # Town02 spawn[0] southbound road only extends ~31 m before the map
+        # boundary.  Probe backwards in decreasing steps.  50 m is preferred;
+        # fall back to whatever is available.
         ego_wp     = world.get_map().get_waypoint(self._ego().get_location())
         behind_wps = None
         for dist in [30.0, 25.0, 20.0, 15.0]:
@@ -1721,143 +1739,174 @@ class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
 
         if not behind_wps:
             self._emerg_npc = None
-            print("[S4] WARNING: no waypoint behind ego — skipping NPC")
-            return
+            print("[S4] WARNING: no waypoint behind ego — ambulance skipped")
+        else:
+            t = carla.Transform(
+                behind_wps[0].transform.location + carla.Location(z=0.5),
+                behind_wps[0].transform.rotation)
+            npc = world.try_spawn_actor(amb_bp, t)
+            if npc:
+                self._emerg_npc = npc
+                self.other_actors.append(npc)
+                CarlaDataProvider.register_actor(npc, t)
+                CarlaDataProvider._carla_actor_pool[npc.id] = npc
+                loc = npc.get_transform().location
+                print(f"[S4] Ambulance ({amb_bp.id}) id={npc.id}  "
+                      f"x={loc.x:.1f} y={loc.y:.1f}")
+            else:
+                self._emerg_npc = None
+                print("[S4] WARNING: ambulance spawn failed")
 
-        t = carla.Transform(
-            behind_wps[0].transform.location + carla.Location(z=0.5),
-            behind_wps[0].transform.rotation)
-        npc = world.try_spawn_actor(bp, t)
-        if not npc:
-            self._emerg_npc = None
-            print("[S4] WARNING: ambulance spawn failed")
-            return
+        # ---- Parked car: ~60 m ahead of ego, offset ~3 m right (footpath) ----
+        # Ego will pull right and stop on this footpath.  The parked car sits
+        # ~60 m ahead of ego's starting point — visible in front camera before
+        # and during the pull-over — motivating where ego stops.
+        parked_bp = car_bps[1] if len(car_bps) > 1 else (car_bps[0] if car_bps
+                                                           else amb_bp)
+        ahead_wps = ego_wp.next(60.0)
+        if ahead_wps:
+            wp_a    = ahead_wps[0]
+            right_v = wp_a.transform.get_right_vector()
+            # 3.0 m right = onto footpath / shoulder
+            park_loc = carla.Location(
+                x=wp_a.transform.location.x + right_v.x * 3.0,
+                y=wp_a.transform.location.y + right_v.y * 3.0,
+                z=wp_a.transform.location.z + 0.3)
+            park_t  = carla.Transform(park_loc, wp_a.transform.rotation)
+            parked  = world.try_spawn_actor(parked_bp, park_t)
+            if parked:
+                self._parked_car = parked
+                self.other_actors.append(parked)
+                CarlaDataProvider.register_actor(parked, park_t)
+                CarlaDataProvider._carla_actor_pool[parked.id] = parked
+                # Freeze physics — car is completely static, no rolling
+                parked.set_simulate_physics(False)
+                print(f"[S4] Parked car ({parked_bp.id}) id={parked.id}  "
+                      f"x={park_loc.x:.1f} y={park_loc.y:.1f}")
+            else:
+                self._parked_car = None
+                print("[S4] WARNING: parked car spawn failed")
+        else:
+            self._parked_car = None
+            print("[S4] WARNING: no waypoint 60 m ahead — parked car skipped")
 
-        self._emerg_npc = npc
-        self.other_actors.append(npc)
-        CarlaDataProvider.register_actor(npc, t)
-        CarlaDataProvider._carla_actor_pool[npc.id] = npc
         world.tick()
         CarlaDataProvider.on_carla_tick()
-        loc = npc.get_transform().location
-        print(f"[S4] Ambulance ({bp.id}) id={npc.id}  x={loc.x:.1f} y={loc.y:.1f}")
 
     def _do_create_behavior(self):
         from srunner.scenariomanager.timer import TimeOut as TOut
 
-        ego = self._ego()
-        npc = getattr(self, "_emerg_npc", None)
-
-        # dest_far: 120 m along road from spawn[0]
-        # = 49 m north + 33 m east + 38 m north ≈ (x≈41, y≈229).
-        # Well on the second northbound straight; all three phases share it.
-        dest = self._dest(500.0)
+        ego   = self._ego()
+        npc   = getattr(self, "_emerg_npc", None)
+        world = self.world
+        dest  = self._dest(500.0)
 
         # ----------------------------------------------------------------
-        # PullToCurb: two-phase right-curb manoeuvre
-        #   Phase A (steer_ticks=20, 1 s): steer=-0.60, brake=0.10
-        #     → drifts east (+x) while still moving forward
-        #   Phase B (brake_ticks=60, 3 s): steer held, hard brake
-        #     → stops on the right curb
+        # FollowEgo — P-proportional gap controller.
+        #
+        # Uses BasicAgent for steering so the ambulance handles junctions
+        # the same way ego does.  Destination is ego's live position,
+        # refreshed every 10 ticks so routing adapts in near-real-time.
+        # Speed is set by a proportional controller:
+        #   speed = BASE_SPEED + KP * (actual_gap - TARGET_GAP)
+        # Cap at MAX_SPEED so the ambulance can NEVER overtake ego.
+        #
+        # Result: ambulance stays at TARGET_GAP (30 m) throughout Phase 0,
+        # surviving both junctions and always visible in the rear PiP.
+        # ----------------------------------------------------------------
+        class FollowEgo(AtomicBehavior):
+            _TARGET_GAP   = 30.0   # m  — desired following distance
+            _KP           = 1.8    # km/h per metre of gap error
+            _BASE_SPEED   = 25.0   # km/h — matches ego cruise speed
+            _MAX_SPEED    = 40.0   # km/h — hard cap; cannot overtake
+            _UPDATE_TICKS = 10     # ticks between destination refreshes
+
+            def __init__(inner, actor, ego_ref, name="FollowEgo"):
+                super().__init__(name, actor)
+                inner._ego_ref = ego_ref
+                inner._agent   = None
+                inner._tick    = 0
+
+            def initialise(inner):
+                from agents.navigation.basic_agent import BasicAgent
+                inner._agent = BasicAgent(inner._actor,
+                                          target_speed=inner._BASE_SPEED)
+                inner._agent.ignore_traffic_lights(active=True)
+                inner._agent.ignore_vehicles(active=True)
+                inner._agent.set_destination(inner._ego_ref.get_location())
+                inner._tick = 0
+
+            def update(inner):
+                if not (inner._actor and inner._actor.is_alive):
+                    return py_trees.common.Status.SUCCESS
+                inner._tick += 1
+
+                ego_loc = inner._ego_ref.get_location()
+                amb_loc = inner._actor.get_location()
+                gap     = amb_loc.distance(ego_loc)
+
+                # P-control: positive error → too far → speed up
+                gap_err = gap - inner._TARGET_GAP
+                spd     = inner._BASE_SPEED + inner._KP * gap_err
+                spd     = max(5.0, min(inner._MAX_SPEED, spd))
+
+                if inner._tick % inner._UPDATE_TICKS == 0:
+                    inner._agent.set_destination(ego_loc)
+                inner._agent.set_target_speed(spd)
+                ctrl = inner._agent.run_step()
+                inner._actor.apply_control(ctrl)
+                return py_trees.common.Status.RUNNING
+
+        # ----------------------------------------------------------------
+        # PullToCurb v3 — natural footpath stop, calibrated steer.
+        #
+        # Calibration reference (from existing scenario comments):
+        #   steer=+0.80, 3 s (60 ticks), 25 km/h → ~3 m lateral, ~16° yaw
+        #   → lateral rate ≈ 1.0 m/s, turning radius ≈ 75 m.
+        #
+        # Phase A (50 ticks = 2.5 s):
+        #   steer=+0.80, throttle=0, brake=0.
+        #   Lateral displacement ≈ 0.8 m/s × 2.5 s = ~2.0 m (onto footpath).
+        #   Yaw change ≈ (6.94×2.5/75) × 57.3 ≈ 13° — still pointing forward.
+        #
+        # Phase B (80 ticks = 4.0 s):
+        #   steer=0.0, brake=0.85.
+        #   Wheel straightened immediately — ego brakes to a full stop still
+        #   roughly aligned with the road.  No continued arc into buildings.
+        #
+        # CARLA eastbound steer convention:
+        #   positive steer → right (+y = south = footpath side)  ✓
         # ----------------------------------------------------------------
         class PullToCurb(AtomicBehavior):
-            def __init__(inner, actor, steer=-0.60, steer_ticks=20,
-                         brake=0.70, brake_ticks=60, name="PullToCurb"):
+            _STEER_A      = +0.80
+            _STEER_TICKS  =  50    # 2.5 s at 20 fps → ~2 m lateral
+            _BRAKE_B      =  0.85
+            _BRAKE_TICKS  =  80    # 4.0 s → full stop on footpath
+
+            def __init__(inner, actor, name="PullToCurb"):
                 super().__init__(name, actor)
-                inner._steer       = steer
-                inner._steer_ticks = steer_ticks
-                inner._brake       = brake
-                inner._brake_ticks = brake_ticks
-                inner._count       = 0
+                inner._count = 0
 
             def initialise(inner):
                 inner._count = 0
 
             def update(inner):
-                if inner._count < inner._steer_ticks:
-                    # No brake during steer phase — friction kills lateral drift
+                if inner._count < inner._STEER_TICKS:
+                    # Phase A: steer right, no brake — car drifts onto footpath
                     inner._actor.apply_control(carla.VehicleControl(
-                        throttle=0.0, brake=0.0, steer=inner._steer))
+                        throttle=0.0, brake=0.0, steer=inner._STEER_A))
                 else:
+                    # Phase B: wheel straight, hard brake — stop on footpath
                     inner._actor.apply_control(carla.VehicleControl(
-                        throttle=0.0, brake=inner._brake, steer=inner._steer))
+                        throttle=0.0, brake=inner._BRAKE_B, steer=0.0))
                 inner._count += 1
-                total = inner._steer_ticks + inner._brake_ticks
+                total = inner._STEER_TICKS + inner._BRAKE_TICKS
                 return (py_trees.common.Status.SUCCESS
                         if inner._count >= total
                         else py_trees.common.Status.RUNNING)
 
         # ----------------------------------------------------------------
-        # StaticHold: keep ambulance stationary during Phase 0
-        # ----------------------------------------------------------------
-        class StaticHold(AtomicBehavior):
-            def __init__(inner, actor, name="StaticHold"):
-                super().__init__(name, actor)
-
-            def update(inner):
-                inner._actor.apply_control(carla.VehicleControl(
-                    throttle=0.0, brake=1.0))
-                return py_trees.common.Status.RUNNING  # never self-succeeds
-
-        seq = py_trees.composites.Sequence("S4_EmergencyPullOver")
-
-        # ---- Phase 0: ego clears y≈191 junction (10 s), ambulance holds ----
-        # At 25 km/h, ego covers 69 m in 10 s → y≈211, safely past the
-        # first junction.  Ambulance holds brake at y≈111.
-        phase0 = py_trees.composites.Parallel(
-            "S4_Phase0_Corner",
-            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        phase0.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
-                                               ignore_tl=True,
-                                               name="S4_CornerDrive"))
-        if npc:
-            phase0.add_child(StaticHold(npc, name="S4_AmbulanceWait"))
-        phase0.add_child(TOut(10.0, name="S4_Phase0Timeout"))
-        seq.add_child(phase0)
-
-        # ---- Phase 1: ambulance chases ego using BasicAgent (same routing as ego) ----
-        # BasicAgent uses GlobalRoutePlanner → correctly navigates the y≈191
-        # junction turn east, same path as ego.  ignore_vehicles=True so it
-        # doesn't slow for ego.  Trigger at 40 m gap; TOut(20s) fallback.
-        phase1 = py_trees.composites.Parallel(
-            "S4_Phase1_Chase",
-            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        phase1.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
-                                               ignore_tl=True, name="S4_EgoCruise"))
-        if npc:
-            phase1.add_child(EgoBasicAgentBehavior(npc, dest, 60.0,
-                                                   ignore_tl=True,
-                                                   ignore_vehicles=True,
-                                                   name="S4_AmbulanceChase"))
-            phase1.add_child(InTriggerDistanceToVehicle(
-                npc, ego, 40.0, name="S4_AmbulanceClose"))
-        phase1.add_child(TOut(20.0, name="S4_Phase1Timeout"))
-        seq.add_child(phase1)
-
-        # ----------------------------------------------------------------
-        # SnapToRoad: teleport ego back onto nearest road waypoint and
-        # zero velocity so BasicAgent can navigate from a clean state.
-        # ----------------------------------------------------------------
-        class SnapToRoad(AtomicBehavior):
-            def __init__(inner, actor, world, name="SnapToRoad"):
-                super().__init__(name, actor)
-                inner._world = world
-
-            def update(inner):
-                wp = inner._world.get_map().get_waypoint(inner._actor.get_location())
-                inner._actor.set_transform(carla.Transform(
-                    carla.Location(x=wp.transform.location.x,
-                                   y=wp.transform.location.y,
-                                   z=wp.transform.location.z + 0.5),
-                    wp.transform.rotation))
-                inner._actor.set_target_velocity(carla.Vector3D(0, 0, 0))
-                inner._actor.apply_control(carla.VehicleControl(
-                    throttle=0.0, brake=0.0, steer=0.0))
-                return py_trees.common.Status.SUCCESS
-
-        # ----------------------------------------------------------------
         # HoldBrake: keep ego fully braked — RUNNING forever.
-        # Used after PullToCurb so ego stays at curb while ambulance passes.
         # ----------------------------------------------------------------
         class HoldBrake(AtomicBehavior):
             def __init__(inner, actor, name="HoldBrake"):
@@ -1869,8 +1918,94 @@ class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
                 return py_trees.common.Status.RUNNING
 
         # ----------------------------------------------------------------
-        # WaitUntilAhead: succeeds once `chaser` is `margin` m past `anchor`
-        # along the y axis (north direction on this road).
+        # AmbulancePass — BasicAgent at 50 km/h + left dodge.
+        #
+        # BasicAgent routes along road centre, which is naturally LEFT of
+        # ego stopped on the footpath — no steer needed to avoid.
+        # The explicit dodge is a visual enhancement: a -0.15 steer nudge
+        # for 30 ticks when the ambulance is alongside the stopped ego.
+        #
+        # CARLA eastbound steer sign (confirmed from S5v2 comment):
+        #   negative steer = -y direction = LEFT (north, away from footpath)
+        #   positive steer = +y direction = RIGHT (south, toward footpath)
+        #
+        # Lateral detection:
+        #   ego.y - amb.y > LAT_THRESH means ego has moved south (footpath)
+        #   while ambulance is still on the road.  POSITIVE when ego is
+        #   correctly pulled over.  Previous code had this INVERTED.
+        #
+        # Timing:
+        #   FollowEgo puts ambulance at 30 m when Phase 2 starts.
+        #   Ambulance accelerates from 25 → 50 km/h; ego decelerates.
+        #   Average relative closing speed ~15 km/h = 4.2 m/s.
+        #   Time to close 30 m ≈ 7 s → ego has 7 s to complete pull-over
+        #   (PullToCurb = 6.5 s total).  Ego is stopped before ambulance
+        #   arrives.  No crash.
+        # ----------------------------------------------------------------
+        class AmbulancePass(AtomicBehavior):
+            _SPEED_KMH   = 50.0
+            _DODGE_STEER = -0.15   # LEFT on eastbound road (negative = -y = north)
+            _DODGE_TICKS = 30
+            _LAT_THRESH  = 1.0     # m: ego.y - amb.y must exceed this
+            _LON_THRESH  = 15.0    # m: x-axis proximity for dodge to fire
+
+            def __init__(inner, actor, ego_ref, dest, name="AmbulancePass"):
+                super().__init__(name, actor)
+                inner._ego_ref    = ego_ref
+                inner._dest       = dest
+                inner._agent      = None
+                inner._dodge_tick = 0
+                inner._dodging    = False
+                inner._dodge_done = False
+
+            def initialise(inner):
+                from agents.navigation.basic_agent import BasicAgent
+                inner._agent = BasicAgent(inner._actor,
+                                          target_speed=inner._SPEED_KMH)
+                inner._agent.ignore_traffic_lights(active=True)
+                inner._agent.ignore_vehicles(active=True)
+                inner._agent.set_destination(inner._dest)
+                inner._dodge_tick = 0
+                inner._dodging    = False
+                inner._dodge_done = False
+
+            def update(inner):
+                if not (inner._actor and inner._actor.is_alive):
+                    return py_trees.common.Status.SUCCESS
+
+                ctrl = inner._agent.run_step()
+
+                if not inner._dodge_done:
+                    ego_loc = inner._ego_ref.get_location()
+                    amb_loc = inner._actor.get_location()
+
+                    # ego.y - amb.y > 0 when ego is south (footpath) of ambulance
+                    lat_gap = ego_loc.y - amb_loc.y
+                    # x-distance: fire when ambulance is within LON_THRESH of ego
+                    lon_dist = abs(ego_loc.x - amb_loc.x)
+
+                    if (lat_gap > inner._LAT_THRESH
+                            and lon_dist < inner._LON_THRESH
+                            and not inner._dodging):
+                        inner._dodging    = True
+                        inner._dodge_tick = 0
+                        print(f"[S4] AmbulancePass dodge-left  "
+                              f"lat={lat_gap:.2f} m  lon={lon_dist:.2f} m")
+
+                    if inner._dodging and inner._dodge_tick < inner._DODGE_TICKS:
+                        ctrl.steer = max(-1.0,
+                                         min(1.0, ctrl.steer + inner._DODGE_STEER))
+                        inner._dodge_tick += 1
+                    elif inner._dodging:
+                        inner._dodge_done = True
+                        inner._dodging    = False
+
+                inner._actor.apply_control(ctrl)
+                return py_trees.common.Status.RUNNING
+
+        # ----------------------------------------------------------------
+        # WaitUntilAhead: Phase 2 ends when ambulance is margin m east
+        # of stopped ego on the x-axis.
         # ----------------------------------------------------------------
         class WaitUntilAhead(AtomicBehavior):
             def __init__(inner, chaser, anchor, margin=20.0, name="WaitUntilAhead"):
@@ -1879,24 +2014,38 @@ class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
                 inner._margin = margin
 
             def update(inner):
-                cy = inner._actor.get_location().y
-                ay = inner._anchor.get_location().y
+                cx = inner._actor.get_location().x
+                ax = inner._anchor.get_location().x
                 return (py_trees.common.Status.SUCCESS
-                        if cy > ay + inner._margin
+                        if cx > ax + inner._margin
                         else py_trees.common.Status.RUNNING)
 
-        # ---- Phase 2: ego pulls LEFT, holds at curb until ambulance clears ----
-        # Structure: Parallel(SUCCESS_ON_ONE)
-        #   - Sequence: PullToCurb → HoldBrake  (ego stays stopped after PullToCurb)
-        #   - BasicAgent(ambulance, ignore_vehicles=True)  ← drives past stopped ego
-        #   - WaitUntilAhead(ambulance, ego, margin=20)  ← ends phase when clear
-        #   - TOut(12s) fallback
-        # WaitUntilAhead fires AFTER ambulance is 20 m north of stopped ego,
-        # so SnapToRoad teleport can't block the ambulance.
+        seq = py_trees.composites.Sequence("S4_EmergencyPullOver")
+
+        # ---- Phase 0 (22 s): navigate to eastbound straight ----
+        # At 25 km/h = 6.94 m/s, the route to the eastbound straight is
+        # 49 + 48 + 49 = 146 m → ~21 s.  TOut(22) puts ego ~7 m onto
+        # the straight before Phase 2 fires.
+        # FollowEgo keeps ambulance at exactly 30 m behind ego throughout,
+        # surviving both junctions — always visible in rear PiP.
+        phase0 = py_trees.composites.Parallel(
+            "S4_Phase0_Navigate",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        phase0.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
+                                               ignore_tl=True,
+                                               name="S4_P0_EgoDrive"))
+        if npc:
+            phase0.add_child(FollowEgo(npc, ego, name="S4_P0_FollowEgo"))
+        phase0.add_child(TOut(22.0, name="S4_Phase0Timeout"))
+        seq.add_child(phase0)
+
+        # ---- Phase 2 (≤14 s): ego pulls over, ambulance passes ----
+        # No Phase 1 — FollowEgo already placed ambulance at 30 m.
+        # Ambulance accelerates from 25 → 50 km/h while ego decelerates
+        # and moves right.  Average relative closing ~4 m/s → 7 s to
+        # close 30 m — ego's PullToCurb (6.5 s) completes first.
         curb_hold = py_trees.composites.Sequence("S4_CurbHold")
-        curb_hold.add_child(PullToCurb(ego, steer=+0.60, steer_ticks=20,
-                                       brake=0.80, brake_ticks=60,
-                                       name="S4_PullToCurb"))
+        curb_hold.add_child(PullToCurb(ego, name="S4_PullToCurb"))
         curb_hold.add_child(HoldBrake(ego, name="S4_HoldBrake"))
 
         phase2 = py_trees.composites.Parallel(
@@ -1904,31 +2053,53 @@ class S4_EmergencyVehiclePullOver(AdaptTrustScenario):
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         phase2.add_child(curb_hold)
         if npc:
-            phase2.add_child(EgoBasicAgentBehavior(npc, dest, 60.0,
-                                                   ignore_tl=True,
-                                                   ignore_vehicles=True,
-                                                   name="S4_AmbulancePass"))
+            phase2.add_child(AmbulancePass(npc, ego, dest,
+                                           name="S4_P2_AmbPass"))
             phase2.add_child(WaitUntilAhead(npc, ego, margin=20.0,
-                                            name="S4_AmbulanceClear"))
-        phase2.add_child(TOut(12.0, name="S4_Phase2Timeout"))
+                                            name="S4_P2_AmbClear"))
+        phase2.add_child(TOut(16.0, name="S4_Phase2Timeout"))
         seq.add_child(phase2)
 
-        # ---- Phase 3: snap ego back to road, then resume ----
-        # SnapToRoad fires only after ambulance is 20 m clear, so it cannot
-        # block the ambulance path. Ego is snapped to road orientation so
-        # BasicAgent drives north correctly.
-        phase3_seq = py_trees.composites.Sequence("S4_Phase3_Seq")
-        phase3_seq.add_child(SnapToRoad(ego, self.world, name="S4_SnapToRoad"))
+        # ---- Phase 3 (<=12 s): ego reverses onto road, then follows ambulance ----
+        # ReverseOntoRoad: 25 ticks (1.25 s) reverse at throttle=0.5 backs ego
+        # off the footpath and onto the road surface.
+        # Then BasicAgent takes over for the forward drive — scene cuts on TOut.
+        class ReverseOntoRoad(AtomicBehavior):
+            _TICKS = 25
+
+            def __init__(inner, actor, name="ReverseOntoRoad"):
+                super().__init__(name, actor)
+                inner._count = 0
+
+            def initialise(inner):
+                inner._count = 0
+
+            def update(inner):
+                inner._actor.apply_control(carla.VehicleControl(
+                    throttle=0.5, reverse=True, steer=0.0, brake=0.0))
+                inner._count += 1
+                return (py_trees.common.Status.SUCCESS
+                        if inner._count >= inner._TICKS
+                        else py_trees.common.Status.RUNNING)
+
+        ego_resume = py_trees.composites.Sequence("S4_EgoResume")
+        ego_resume.add_child(ReverseOntoRoad(ego, name="S4_Reverse"))
+        ego_resume.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
+                                                   ignore_tl=True,
+                                                   ignore_vehicles=True,
+                                                   name="S4_P3_Forward"))
+
         phase3 = py_trees.composites.Parallel(
             "S4_Phase3_Resume",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        phase3.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
-                                               ignore_tl=True,
-                                               ignore_vehicles=True,
-                                               name="S4_Resume"))
-        phase3.add_child(TOut(8.0, name="S4_Phase3Timeout"))
-        phase3_seq.add_child(phase3)
-        seq.add_child(phase3_seq)
+        phase3.add_child(ego_resume)
+        if npc:
+            phase3.add_child(EgoBasicAgentBehavior(npc, dest, 60.0,
+                                                   ignore_tl=True,
+                                                   ignore_vehicles=True,
+                                                   name="S4_P3_AmbContinue"))
+        phase3.add_child(TOut(12.0, name="S4_Phase3Timeout"))
+        seq.add_child(phase3)
 
         return seq
 
@@ -2221,23 +2392,51 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
         bike = getattr(self, "_bike", None)
 
         # ----------------------------------------------------------------
-        # Inline atomic: cyclist merges left into ego lane.
-        # Negative steer = -y direction = LEFT on this eastbound road
-        # (empirically confirmed: positive steer → +y → shoulder/right).
-        # 35 ticks steer + 15 ticks straight at 20 Hz ≈ 2.5 s total.
+        # Position estimates (all at 20 fps):
+        #
+        #   Ego spawn : x=-67.3  y=28.0  heading east (+x)
+        #   Cyclist   : x=-21.3  y=30.5  (46 m ahead, 2.5 m right of centre)
+        #   Steer conv: negative steer = -y = LEFT (away from footpath)
+        #
+        #   Phase 0 end (DriveDistance 25 m):
+        #     Ego x=-42.3  Cyclist x=-21.3  euclidean gap=21.1 m
+        #
+        #   Phase 1 trigger (InTrigger 14 m):
+        #     Fires at ~1.1 s — by then CyclistDart's 20-tick (1.0 s) steer
+        #     phase has fully completed.
+        #     Ego x≈-33.1  Cyclist x≈-18.8  y≈28.8 (in lane)  gap≈14 m
+        #
+        #   Phase 2 (ForceEgoBrake 0.9, 40 ticks = 2 s):
+        #     Ego stops in ~1.0 s, travels 4.3 m  →  ego x≈-28.8
+        #     Cyclist at ~16 km/h avg moves 8.9 m  →  cyclist x≈-9.9
+        #     Minimum gap ≈ 14.9 m at t=0.5 s.  SAFE.
+        #     Gap at end = 18.9 m (cyclist pulling away).
+        #
+        #   Phase 3 (EgoManeuver 35 ticks = 1.75 s):
+        #     steer=-0.10, throttle=0.5 → ~1.6 m left (y: 28.0→26.4)
+        #     Calibration ref: steer=0.04 at 22 km/h → 1 m / 1.5 s
+        #     Ego x≈-23.9  Cyclist x≈-0.2  gap≈23.7 m
+        #
+        #   Phase 4 (EgoResumeStrght 60 ticks = 3 s):
+        #     _STEER_CORR=+0.04 for 30 ticks → +0.91 m right → y≈27.3
+        #     Ego resumes 30 km/h heading straight.  Cyclist far ahead.
         # ----------------------------------------------------------------
-        # ----------------------------------------------------------------
-        # CyclistMerge: partial peek into lane — ~1 m left only.
-        # steer=-0.15 for 20 ticks, then ride straight.
-        # Negative steer = -y = left on this eastbound road.
-        # ----------------------------------------------------------------
-        class CyclistMerge(AtomicBehavior):
-            _STEER       = -0.15
-            _SPEED_MPS   = 6.0 / 3.6
-            _TICKS_STEER = 20
-            _TICKS_STR   = 80   # ride straight afterward
 
-            def __init__(self, actor, name="CyclistMerge"):
+        # ----------------------------------------------------------------
+        # CyclistDart — launches immediately with speed.
+        # steer=-0.25 for 20 ticks (1 s): cyclist moves ~1.7 m left into lane.
+        # throttle=0.9 from rest: cyclist reaches ~15 km/h during steer phase.
+        # Then rides straight at 20 km/h via WaypointFollower in phases 2-4.
+        # Negative steer = -y = LEFT on this eastbound road.
+        # ----------------------------------------------------------------
+        class CyclistDart(AtomicBehavior):
+            _STEER       = -0.25
+            _THROTTLE    =  0.9
+            _TARGET_MPS  = 15.0 / 3.6
+            _TICKS_STEER = 20    # 1.0 s steer left — ~1.7 m into lane
+            _TICKS_STR   = 60    # 3.0 s ride straight (until WaypointFollower takes over)
+
+            def __init__(self, actor, name="CyclistDart"):
                 super().__init__(name, actor)
                 self._count = 0
 
@@ -2249,7 +2448,7 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
                     return py_trees.common.Status.SUCCESS
                 v   = self._actor.get_velocity()
                 spd = math.sqrt(v.x**2 + v.y**2 + v.z**2)
-                thr = 0.3 if spd < self._SPEED_MPS else 0.0
+                thr = self._THROTTLE if spd < self._TARGET_MPS else 0.2
                 st  = self._STEER if self._count < self._TICKS_STEER else 0.0
                 self._actor.apply_control(
                     carla.VehicleControl(throttle=thr, steer=st, brake=0.0))
@@ -2260,15 +2459,18 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
                         else py_trees.common.Status.RUNNING)
 
         # ----------------------------------------------------------------
-        # EgoSlowDeviate: soft brake to ~15 km/h + steer left simultaneously.
-        # No full stop. 50 ticks ≈ 2.5 s.
+        # EgoManeuver — steer left while accelerating, clearing cyclist.
+        # steer=-0.10 for 35 ticks (1.75 s) at avg ~12 km/h.
+        # Lateral displacement ≈ 1.6 m left (y: 28.0→26.4).
+        # Ego stays in own lane — left edge, not crossing centre line.
+        # throttle=0.5 keeps ego rolling forward at 10-18 km/h.
         # ----------------------------------------------------------------
-        class EgoSlowDeviate(AtomicBehavior):
-            _STEER      = -0.04   # gentle — ~1 m lateral over 30 ticks
-            _TARGET_MPS = 15.0 / 3.6
-            _TICKS      = 30
+        class EgoManeuver(AtomicBehavior):
+            _STEER  = -0.04   # 0.35 m left at avg 10 km/h — well clear of divider
+            _THR    =  0.50
+            _TICKS  =  20     # 1.0 s
 
-            def __init__(self, actor, name="EgoSlowDeviate"):
+            def __init__(self, actor, name="EgoManeuver"):
                 super().__init__(name, actor)
                 self._count = 0
 
@@ -2278,34 +2480,23 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
             def update(self):
                 if not (self._actor and self._actor.is_alive):
                     return py_trees.common.Status.SUCCESS
-                v   = self._actor.get_velocity()
-                spd = math.sqrt(v.x**2 + v.y**2 + v.z**2)
-                if spd > self._TARGET_MPS:
-                    ctrl = carla.VehicleControl(throttle=0.0, steer=self._STEER,
-                                                brake=0.4)
-                else:
-                    ctrl = carla.VehicleControl(throttle=0.3, steer=self._STEER,
-                                                brake=0.0)
-                self._actor.apply_control(ctrl)
+                self._actor.apply_control(carla.VehicleControl(
+                    throttle=self._THR, steer=self._STEER, brake=0.0))
                 self._count += 1
                 return (py_trees.common.Status.SUCCESS
                         if self._count >= self._TICKS
                         else py_trees.common.Status.RUNNING)
 
         # ----------------------------------------------------------------
-        # EgoResumeStrght: accelerate straight ahead — no routing, no junction.
-        # 60 ticks ≈ 3 s at 30 km/h. Enough to clear cyclist and end scenario.
+        # EgoResumeStrght — accelerate to 30 km/h and re-centre.
+        # _STEER_CORR=+0.04 for 30 ticks corrects ~0.91 m rightward,
+        # bringing ego from y≈26.4 back to y≈27.3 (near lane centre).
         # ----------------------------------------------------------------
         class EgoResumeStrght(AtomicBehavior):
-            # Accelerate back to 30 km/h while gently correcting the leftward yaw
-            # that accumulated during EgoSlowDeviate.  steer=+0.015 for the first
-            # 25 ticks (1.25 s, while speed is still low) nudges the car back
-            # toward lane centre without overshooting; steer=0.0 for the
-            # remaining 35 ticks drives straight past the cyclist.
-            _TARGET_MPS   = 30.0 / 3.6
-            _TICKS        = 60
-            _TICKS_CORR   = 25      # ticks of right-correction steer
-            _STEER_CORR   = 0.015   # gentle right steer (positive = +y = right)
+            _TARGET_MPS = 30.0 / 3.6
+            _TICKS      = 60
+            _TICKS_CORR = 15     # ticks of right-correction steer
+            _STEER_CORR = 0.02   # corrects ~0.2 m right — matches 0.35 m maneuver
 
             def __init__(self, actor, name="EgoResumeStrght"):
                 super().__init__(name, actor)
@@ -2330,7 +2521,8 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
 
         seq = py_trees.composites.Sequence("S5v2_HiddenCyclist")
 
-        # Phase 0: ego drives 25 m, cyclist stationary beside truck
+        # ---- Phase 0: ego drives 25 m, cyclist stationary beside truck ----
+        # At end: ego x=-42.3, cyclist x=-21.3, gap=21.1 m.
         phase0 = py_trees.composites.Parallel(
             "S5v2_Phase0_Approach",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
@@ -2339,43 +2531,65 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
         phase0.add_child(DriveDistance(ego, 25.0, name="S5v2_P0_Dist"))
         seq.add_child(phase0)
 
-        # Phase 1: cyclist peeks into lane + ego keeps approaching at 30 km/h.
-        # Trigger on ego DriveDistance(35m total) — by then cyclist has been
-        # merging for ~1 s and is partially in the lane. Using distance-to-vehicle
-        # fired too early because lateral offset counts in the gap calculation.
+        # ---- Phase 1: cyclist darts; ends when gap reaches 14 m ----
+        # CyclistDart fires immediately: steer=-0.25, throttle=0.9.
+        # InTrigger(14 m) fires at ~1.1 s — cyclist has fully completed
+        # its steer phase (20 ticks = 1.0 s) and is in the lane (y≈28.8).
+        # Ego is still at 30 km/h, gap=14 m — collision without braking in 1.7 s.
         phase1 = py_trees.composites.Parallel(
-            "S5v2_Phase1_Merge",
+            "S5v2_Phase1_Dart",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
         phase1.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
                                                ignore_tl=True, name="S5v2_P1_Drive"))
         if bike:
-            phase1.add_child(CyclistMerge(bike, name="S5v2_CyclistMerge"))
-        # Trigger: ego drives another 10 m (35 m total from spawn)
-        phase1.add_child(DriveDistance(ego, 10.0, name="S5v2_P1_Dist"))
-        phase1.add_child(TOut(8.0, name="S5v2_Phase1Timeout"))
+            phase1.add_child(CyclistDart(bike, name="S5v2_CyclistDart"))
+            phase1.add_child(InTriggerDistanceToVehicle(
+                ego, bike, 14.0, name="S5v2_GapTrigger"))
+        phase1.add_child(TOut(3.0, name="S5v2_Phase1Timeout"))
         seq.add_child(phase1)
 
-        # Phase 2: ego slows + steers left — no full stop, just a deviation
+        # ---- Phase 2: ForceEgoBrake — sharp reactive stop ----
+        # brake=0.9 for 40 ticks (2 s). Ego drops from 30 km/h to ~0 km/h.
+        # Cyclist continues at 20 km/h via WaypointFollower — pulls away fast.
+        # Minimum gap ≈ 14.9 m at t=0.5 s.  Verdict BRAKING fires here.
         phase2 = py_trees.composites.Parallel(
-            "S5v2_Phase2_Deviate",
+            "S5v2_Phase2_Brake",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        phase2.add_child(EgoSlowDeviate(ego, name="S5v2_SlowDeviate"))
+        phase2.add_child(ForceEgoBrake(ego, ticks=40, brake=0.9,
+                                       name="S5v2_EmergencyBrake"))
         if bike:
-            phase2.add_child(WaypointFollower(bike, 8.0 / 3.6,
+            phase2.add_child(WaypointFollower(bike, 20.0 / 3.6,
                                               avoid_collision=False,
                                               name="S5v2_P2_Cyclist"))
         seq.add_child(phase2)
 
-        # Phase 3: ego accelerates straight past cyclist — no BasicAgent, no junction
+        # ---- Phase 3: EgoManeuver — steer left, keep rolling ----
+        # steer=-0.10, throttle=0.5 for 35 ticks (1.75 s).
+        # Ego moves ~1.6 m left while accelerating from ~0 to ~15 km/h.
+        # Cyclist is now 18.9 m ahead — no collision risk.
         phase3 = py_trees.composites.Parallel(
-            "S5v2_Phase3_Resume",
+            "S5v2_Phase3_Maneuver",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        phase3.add_child(EgoResumeStrght(ego, name="S5v2_ResumeStrght"))
+        phase3.add_child(EgoManeuver(ego, name="S5v2_EgoManeuver"))
         if bike:
-            phase3.add_child(WaypointFollower(bike, 8.0 / 3.6,
+            phase3.add_child(WaypointFollower(bike, 20.0 / 3.6,
                                               avoid_collision=False,
                                               name="S5v2_P3_Cyclist"))
         seq.add_child(phase3)
+
+        # ---- Phase 4: EgoResumeStrght — accelerate and re-centre ----
+        # throttle=0.6 back to 30 km/h; steer=+0.04 for 30 ticks corrects
+        # ~0.91 m rightward, bringing ego from y≈26.4 back to y≈27.3.
+        # Cyclist is 23.7 m ahead and moving east — scene ends.
+        phase4 = py_trees.composites.Parallel(
+            "S5v2_Phase4_Resume",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        phase4.add_child(EgoResumeStrght(ego, name="S5v2_ResumeStrght"))
+        if bike:
+            phase4.add_child(WaypointFollower(bike, 20.0 / 3.6,
+                                              avoid_collision=False,
+                                              name="S5v2_P4_Cyclist"))
+        seq.add_child(phase4)
 
         return seq
 

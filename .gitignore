@@ -23,6 +23,10 @@ viz/tsconfig.tsbuildinfo
 *.pt
 *.pth
 
+# Generated assets and compiled binaries (regenerated via setup scripts)
+assets/
+build/
+
 # Python
 __pycache__/
 *.pyc

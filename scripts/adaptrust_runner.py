@@ -47,9 +47,9 @@ from scripts.video_pipeline.overlay import render_overlays
 # ---------------------------------------------------------------------------
 
 class SensorBundle:
-    """Attaches RGB camera and LiDAR to ego; pushes frames to ctx."""
+    """Attaches RGB camera, optional rear camera, and LiDAR to ego."""
 
-    def __init__(self, world, ego, ctx, output_dir: Path):
+    def __init__(self, world, ego, ctx, output_dir: Path, enable_rear: bool = False):
         self._ctx = ctx
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -64,6 +64,19 @@ class SensorBundle:
         self.camera = world.spawn_actor(cam_bp, cam_t, attach_to=ego)
         self.camera.listen(self._on_image)
 
+        # Optional rear-facing camera (PiP overlay — shows ambulance behind)
+        self.rear_camera = None
+        if enable_rear:
+            rear_bp = bp_lib.find("sensor.camera.rgb")
+            rear_bp.set_attribute("image_size_x", "480")
+            rear_bp.set_attribute("image_size_y", "270")
+            rear_bp.set_attribute("fov", "110")
+            rear_t = carla.Transform(
+                carla.Location(x=-2.5, z=1.3),
+                carla.Rotation(yaw=180))
+            self.rear_camera = world.spawn_actor(rear_bp, rear_t, attach_to=ego)
+            self.rear_camera.listen(self._on_rear_image)
+
         # LiDAR
         lid_bp = bp_lib.find("sensor.lidar.ray_cast")
         lid_bp.set_attribute("channels", "64")
@@ -77,9 +90,14 @@ class SensorBundle:
     def _on_image(self, image):
         self._ctx._latest_rgb_frame = image   # Recorder reads from here
 
+    def _on_rear_image(self, image):
+        self._ctx._latest_rear_frame = image  # Recorder composites as PiP
+
     def destroy(self):
         if self.camera.is_alive:
             self.camera.destroy()
+        if self.rear_camera and self.rear_camera.is_alive:
+            self.rear_camera.destroy()
         if self.lidar.is_alive:
             self.lidar.destroy()
 
@@ -135,6 +153,7 @@ class ScenarioContext:
         self.output_dir         = Path(output_dir)
         self._action_events     = []
         self._latest_rgb_frame  = None
+        self._latest_rear_frame = None   # set by SensorBundle if rear cam enabled
         self._collision_event   = None
         self._last_trigger_time = 0.0
         self._steer_sustained   = 0
@@ -271,15 +290,24 @@ class AdaptTrustRunner:
         settings.fixed_delta_seconds   = 1.0 / self.FPS
         world.apply_settings(settings)
 
-        # Traffic Manager sync
-        tm = client.get_trafficmanager(8000)
+        # Traffic Manager sync — try 8000, fall back to a free port if already bound
+        import socket as _socket
+        def _tm_port_free(port):
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                return s.connect_ex(("127.0.0.1", port)) != 0
+        tm_port = 8000 if _tm_port_free(8000) else 8001
+        try:
+            tm = client.get_trafficmanager(tm_port)
+        except RuntimeError:
+            tm_port = 8002
+            tm = client.get_trafficmanager(tm_port)
         tm.set_synchronous_mode(True)
         tm.set_global_distance_to_leading_vehicle(2.0)
 
         # CarlaDataProvider
         CarlaDataProvider.set_client(client)
         CarlaDataProvider.set_world(world)
-        CarlaDataProvider.set_traffic_manager_port(8000)
+        CarlaDataProvider.set_traffic_manager_port(tm_port)
 
         # Destroy any leftover vehicles/walkers from a previous crashed run
         for actor in world.get_actors().filter("vehicle.*"):
@@ -323,7 +351,10 @@ class AdaptTrustRunner:
         )
 
         # Sensors — camera callback writes to ctx._latest_rgb_frame
-        sensors = SensorBundle(world, ego, ctx, self.output_dir / "raw")
+        # Rear camera PiP enabled for all S4 runs (ambulance approaches from behind)
+        enable_rear = self.scenario_id == "S4_EmergencyVehiclePullOver"
+        sensors = SensorBundle(world, ego, ctx, self.output_dir / "raw",
+                               enable_rear=enable_rear)
 
         rec = Recorder(ctx)
 

@@ -50,8 +50,9 @@ Vehicle data: Speed={speed} km/h, Brake={brake}, Throttle={throttle}, Steer={ste
 Detected objects: {yolo_objects}
 Traffic light: {traffic_light_state}
 Nearest participant: {nearest_npc}
-In exactly 1 short sentence, describe what the vehicle is about to do and why. \
-Use anticipatory language (e.g. "is slowing down", "is preparing to stop", "is moving to the side")."""
+In exactly 1 sentence of 10 words or fewer, describe what the vehicle is about to do and why. \
+Use anticipatory language (e.g. "is slowing down", "is preparing to stop", "is moving to the side"). \
+Example: 'The vehicle is slowing down for a pedestrian ahead.'"""
 
 _TELEOLOGICAL_PROMPT = """\
 You are an autonomous vehicle speaking directly to your passenger. Look at these frames — you are about to take an action.
@@ -341,7 +342,7 @@ def _call_gpt4o(
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
-                max_tokens=120,
+                max_tokens=50,
                 temperature=0.3,
             )
             return response.choices[0].message.content.strip()
@@ -439,6 +440,8 @@ def generate_all_explanations(scenario_dir: str | Path) -> dict[str, Path]:
         len(events), scenario_dir.name,
     )
 
+    scenario_id = scenario_dir.name.split("_run")[0].split("_")[0]  # e.g. "L3", "S4", "S1"
+
     # ------------------------------------------------------------------
     # Condition 1 — None (control)
     # ------------------------------------------------------------------
@@ -474,7 +477,65 @@ def generate_all_explanations(scenario_dir: str | Path) -> dict[str, Path]:
             ev["event_index"], trigger, ts, len(image_paths),
         )
 
-        if gpt_available and not gpt_skipped:
+        # Context-aware event rules — avoids GPT confusion on follow-up events
+        ev_idx_val = ev["event_index"]
+        prev_trigger = events[ev_idx_val - 1]["trigger_type"] if ev_idx_val > 0 else None
+        next_trigger = events[ev_idx_val + 1]["trigger_type"] if ev_idx_val < len(events) - 1 else None
+
+        if scenario_id == "S4":
+            if ev_idx_val == 0:
+                desc = "The vehicle has detected an emergency vehicle approaching from behind."
+                tele = "I've detected an ambulance behind me."
+            elif ev_idx_val == 1:
+                desc = "The vehicle is steering right to pull over for the emergency vehicle."
+                tele = "I'm steering right and slowing down to let the ambulance pass."
+            else:
+                desc = ""
+                tele = ""
+            descriptive_entries.append(_make_entry(ev, desc))
+            teleological_entries.append(_make_entry(ev, tele))
+            continue
+
+        if scenario_id == "L3" and trigger == "ACCELERATING" and ev_idx_val == 0:
+            # Narrow street entry — hardcoded; audio_start_s fires after the turn (video ~3.1s)
+            desc = "The vehicle is slowing down to pass parked cars in the narrow lane."
+            tele = "I'm slowing down to carefully navigate past the parked cars ahead."
+            descriptive_entries.append({**_make_entry(ev, desc), "audio_start_s": 3.1})
+            teleological_entries.append({**_make_entry(ev, tele), "audio_start_s": 3.1})
+            continue
+
+        elif trigger == "BRAKING" and next_trigger == "TURNING":
+            # Suppress — merged explanation will appear on the TURNING event
+            desc = ""
+            tele = ""
+
+        elif trigger == "TURNING" and prev_trigger == "BRAKING":
+            # Merged brake+turn explanation, direction from steer
+            direction = "left" if snap.get("steer", 0) > 0 else "right"
+            desc = f"The vehicle is braking and turning {direction} to evade."
+            tele = f"I'm braking and steering {direction} to avoid the stopped car ahead."
+
+        elif trigger == "ACCELERATING" and prev_trigger == "TURNING":
+            # Suppress — covered by merged brake+turn explanation above
+            desc = ""
+            tele = ""
+
+        elif trigger == "BRAKING" and prev_trigger == "ACCELERATING":
+            if ev_idx_val >= 2 and events[ev_idx_val - 2]["trigger_type"] == "TURNING":
+                # S2 post-evasion pattern: BRAKING→TURNING→ACCEL→BRAKING
+                desc = "The vehicle is resuming normal speed."
+                tele = "I'm cruising back to normal speed."
+            else:
+                # End-of-sequence brake (e.g. L3) — suppress
+                desc = ""
+                tele = ""
+
+        elif trigger == "ACCELERATING" and ev_idx_val > 0:
+            # Non-first ACCELERATING — resuming after event
+            desc = "The vehicle is resuming normal speed."
+            tele = "I'm cruising back to normal speed."
+
+        elif gpt_available and not gpt_skipped:
             try:
                 desc = _call_gpt4o(client, _DESCRIPTIVE_PROMPT, ctx, image_paths)
                 tele = _call_gpt4o(client, _TELEOLOGICAL_PROMPT, ctx, image_paths)

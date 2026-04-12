@@ -80,6 +80,36 @@ def _carla_image_to_bgr(image) -> np.ndarray:
     return array[:, :, :3].copy()  # drop alpha, make contiguous
 
 
+# PiP dimensions: 1/4 of main frame width, top-right corner
+_PIP_W, _PIP_H = 480, 270
+_PIP_MARGIN    = 12
+_PIP_BORDER    = 3
+
+
+def _composite_rear_pip(main_bgr: np.ndarray, rear_image) -> np.ndarray:
+    """Overlay rear-camera feed as a picture-in-picture in the top-right corner."""
+    rear_arr = np.frombuffer(rear_image.raw_data, dtype=np.uint8)
+    rear_arr = rear_arr.reshape((rear_image.height, rear_image.width, 4))
+    rear_bgr = rear_arr[:, :, :3].copy()
+    pip = cv2.resize(rear_bgr, (_PIP_W, _PIP_H), interpolation=cv2.INTER_LINEAR)
+
+    # Position: top-right
+    x0 = _VIDEO_WIDTH - _PIP_W - _PIP_MARGIN
+    y0 = _PIP_MARGIN
+
+    out = main_bgr.copy()
+    # White border
+    out[y0 - _PIP_BORDER : y0 + _PIP_H + _PIP_BORDER,
+        x0 - _PIP_BORDER : x0 + _PIP_W + _PIP_BORDER] = (255, 255, 255)
+    out[y0 : y0 + _PIP_H, x0 : x0 + _PIP_W] = pip
+
+    # Label
+    cv2.putText(out, "REAR", (x0 + 6, y0 + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+                cv2.LINE_AA)
+    return out
+
+
 class Recorder:
     """
     Per-scenario recording context manager.
@@ -181,6 +211,11 @@ class Recorder:
         else:
             bgr = _carla_image_to_bgr(raw_image)
             detections = self._run_yolo(bgr, telemetry_frame["timestamp"])
+
+        # Composite rear-camera PiP (top-right corner) if rear cam is active
+        rear_image = getattr(self.scenario, "_latest_rear_frame", None)
+        if rear_image is not None:
+            bgr = _composite_rear_pip(bgr, rear_image)
 
         self._video_writer.write(bgr)
 

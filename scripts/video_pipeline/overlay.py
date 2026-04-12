@@ -208,20 +208,38 @@ def _find_frame_for_time(timestamps: list[float], sim_time: float) -> int:
     return max(0, min(lo, len(timestamps) - 1))
 
 
+_TTS_WORDS_PER_SECOND = 2.5   # gTTS UK accent approximate rate
+
 def _build_frame_text_map(
     events: list[dict],
     timestamps: list[float],
     before_s: float = DISPLAY_BEFORE_S,
     after_s:  float = DISPLAY_AFTER_S,
+    fps: float = 30.0,
 ) -> dict[int, str]:
     mapping: dict[int, str] = {}
     for event in events:
         explanation = event.get("explanation", "")
         if not explanation:
             continue
-        ts = event["timestamp"]
-        start = _find_frame_for_time(timestamps, ts - before_s)
-        end   = _find_frame_for_time(timestamps, ts + after_s)
+
+        if "audio_start_s" in event:
+            # Explicit override: subtitle starts when audio starts
+            start_vid  = float(event["audio_start_s"])
+            word_count = len(explanation.split())
+            dur        = word_count / _TTS_WORDS_PER_SECOND
+            end_vid    = start_vid + dur
+            start = int(start_vid * fps)
+            end   = int(end_vid   * fps)
+        else:
+            # Default: right-align subtitle to trigger (matches right-aligned audio)
+            ts            = event["timestamp"]
+            trigger_frame = _find_frame_for_time(timestamps, ts)
+            word_count    = len(explanation.split())
+            clip_frames   = int((word_count / _TTS_WORDS_PER_SECOND) * fps)
+            start = max(0, trigger_frame - clip_frames)
+            end   = trigger_frame
+
         for fi in range(start, end + 1):
             mapping[fi] = explanation
     return mapping
@@ -548,7 +566,7 @@ def render_overlays(
             continue
 
         events         = json.loads(exp_path.read_text())
-        frame_text_map = _build_frame_text_map(events, timestamps)
+        frame_text_map = _build_frame_text_map(events, timestamps, fps=fps)
 
         out_path = scenario_dir / f"video_{condition}.mp4"
         _render_condition(
