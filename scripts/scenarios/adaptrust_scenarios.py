@@ -2595,6 +2595,374 @@ class S5v2_HiddenCyclist(AdaptTrustScenario):
 
 
 # ---------------------------------------------------------------------------
+# S5_TrafficLightCruise — ego-only traffic compliance demo
+# ---------------------------------------------------------------------------
+
+class S5_TrafficLightCruise(AdaptTrustScenario):
+    """
+    Town10HD spawn[1] — Three-event traffic-compliance demonstration.
+
+    All traffic lights start GREEN (frozen).  The event controller then
+    stages exactly three observable moments:
+
+      Event 1 — RED LIGHT STOP + GO  (~t=8 s)
+        TL_first is immediately set RED.  Ego decelerates and stops.
+        After 3 s stationary the light flips GREEN.  Ego accelerates.
+        → ACCELERATING trigger  (traffic_light_state="green")
+        → GPT-4o: "The vehicle is accelerating as the light turned green."
+
+      Event 2 — GREEN LIGHT PASS-THROUGH  (~t=25 s)
+        TL_second stays GREEN.  Ego cruises through at ~30 km/h.
+        → GREEN_LIGHT_PASS trigger  (traffic_light_state="green", YOLO sees TL)
+        → GPT-4o: "The vehicle is proceeding through a green traffic light."
+
+      Event 3 — STOP SIGN  (~t=40 s)
+        A stop-sign landmark (or virtual stop point 350 m ahead if none
+        found) causes ego to decelerate and hold a full stop for 2 s.
+        → BRAKING trigger  (YOLO sees stop sign / yolo_class="stop sign")
+        → GPT-4o: "The vehicle is stopping at a stop sign ahead."
+
+    No NPCs.  YOLO detects traffic lights and stop signs throughout.
+    """
+
+    duration       = 60.0
+    target_speed   = 30.0
+    freeze_tls     = True    # freeze ALL TLs green; behavior overrides TL_first
+    critical_event = "BRAKING"
+
+    # ── Initialization: find TLs and stop sign on route ───────────────────
+    def _do_initialize_actors(self, world):
+        ego     = self._ego()
+        wp      = world.get_map().get_waypoint(ego.get_location())
+        all_tls = list(world.get_actors().filter("traffic.traffic_light"))
+
+        self._tl_first    = None
+        self._tl_second   = None
+        self._stop_loc    = None   # carla.Location for stop-sign event
+
+        # ── Find first two TLs by walking route waypoints every 5 m ──────
+        seen_ids: set = set()
+        current = wp
+        for _ in range(120):        # probe up to 600 m
+            nexts = current.next(5.0)
+            if not nexts:
+                break
+            current = nexts[0]
+            for tl in all_tls:
+                if tl.id in seen_ids:
+                    continue
+                if current.transform.location.distance(tl.get_location()) < 20.0:
+                    seen_ids.add(tl.id)
+                    loc = tl.get_location()
+                    if self._tl_first is None:
+                        self._tl_first = tl
+                        print(f"[S5_TLC] TL_first  id={tl.id}  x={loc.x:.1f} y={loc.y:.1f}")
+                    elif self._tl_second is None:
+                        self._tl_second = tl
+                        print(f"[S5_TLC] TL_second id={tl.id}  x={loc.x:.1f} y={loc.y:.1f}")
+            if self._tl_first and self._tl_second:
+                break
+
+        # ── Find stop sign landmark beyond TL_second ─────────────────────
+        try:
+            landmarks = wp.get_landmarks(700.0, stop_at_junction=False)
+            stop_lms  = [l for l in landmarks if l.type == "206"]
+            if stop_lms:
+                # Pick the first one that is clearly past TL_second
+                tl2_loc = self._tl_second.get_location() if self._tl_second else None
+                for lm in stop_lms:
+                    if tl2_loc is None or lm.transform.location.distance(tl2_loc) > 30.0:
+                        self._stop_loc = lm.transform.location
+                        print(f"[S5_TLC] Stop sign  x={self._stop_loc.x:.1f} "
+                              f"y={self._stop_loc.y:.1f} (landmark type=206)")
+                        break
+        except Exception as e:
+            print(f"[S5_TLC] Landmark probe failed ({e}) — using virtual stop point")
+
+        # Fallback: virtual stop 350 m ahead on route
+        if self._stop_loc is None:
+            fallback = wp.next(350.0)
+            if fallback:
+                self._stop_loc = fallback[0].transform.location
+                print(f"[S5_TLC] Virtual stop point  x={self._stop_loc.x:.1f} "
+                      f"y={self._stop_loc.y:.1f}")
+            else:
+                print("[S5_TLC] WARNING: could not find any stop location")
+
+        if self._tl_first is None:
+            print("[S5_TLC] WARNING: no TLs found — all events will be absent")
+
+        world.tick()
+        CarlaDataProvider.on_carla_tick()
+
+    # ── Behavior tree ─────────────────────────────────────────────────────
+    def _do_create_behavior(self):
+        ego      = self._ego()
+        dest     = self._dest(700.0)
+        tl_first  = getattr(self, "_tl_first",  None)
+        tl_second = getattr(self, "_tl_second", None)
+        stop_loc  = getattr(self, "_stop_loc",  None)
+
+        # ── One-shot TL state setter ──────────────────────────────────────
+        class SetTLState(AtomicBehavior):
+            def __init__(inner, tl, state, name="SetTLState"):
+                super().__init__(name, ego)
+                inner._tl = tl; inner._state = state
+            def update(inner):
+                if inner._tl:
+                    inner._tl.set_state(inner._state)
+                    inner._tl.freeze(True)
+                return py_trees.common.Status.SUCCESS
+
+        # ── Event 1: wait until ego stops at TL_first, then flip green ───
+        class WaitStopFlipGreen(AtomicBehavior):
+            _STOP_KMH   = 2.0
+            _NEAR_M     = 40.0  # TL pole can be 30-35m from stop line
+            _HOLD_TICKS = 60   # 3 s at 20 Hz
+
+            def __init__(inner, tl, name="WaitStopFlipGreen"):
+                super().__init__(name, ego)
+                inner._tl = tl; inner._stopped = False; inner._ticks = 0
+
+            def initialise(inner):
+                inner._stopped = False; inner._ticks = 0
+
+            def update(inner):
+                if inner._tl is None:
+                    return py_trees.common.Status.SUCCESS
+                v     = ego.get_velocity()
+                speed = 3.6 * math.sqrt(v.x**2 + v.y**2)
+                dist  = ego.get_location().distance(inner._tl.get_location())
+
+                if not inner._stopped:
+                    if dist < inner._NEAR_M and speed < inner._STOP_KMH:
+                        inner._stopped = True
+                        print(f"[S5_TLC] Ego stopped at TL_first  dist={dist:.1f}m")
+                    return py_trees.common.Status.RUNNING
+
+                inner._ticks += 1
+                if inner._ticks >= inner._HOLD_TICKS:
+                    inner._tl.set_state(carla.TrafficLightState.Green)
+                    inner._tl.freeze(True)
+                    print(f"[S5_TLC] TL_first → GREEN")
+                    return py_trees.common.Status.SUCCESS
+                return py_trees.common.Status.RUNNING
+
+        # ── Event 2: wait until ego has cleared TL_second ────────────────
+        # (GREEN_LIGHT_PASS trigger fires automatically via ScenarioContext
+        #  once ego enters TL_second's influence zone at cruising speed)
+        class WaitPastTL(AtomicBehavior):
+            def __init__(inner, tl, name="WaitPastTL"):
+                super().__init__(name, ego)
+                inner._tl = tl; inner._close = False
+
+            def initialise(inner):
+                inner._close = False
+
+            def update(inner):
+                if inner._tl is None:
+                    return py_trees.common.Status.SUCCESS
+                d = ego.get_location().distance(inner._tl.get_location())
+                if not inner._close and d < 20.0:
+                    inner._close = True
+                if inner._close and d > 35.0:
+                    print(f"[S5_TLC] Ego cleared TL_second")
+                    return py_trees.common.Status.SUCCESS
+                return py_trees.common.Status.RUNNING
+
+        # ── Event 3: force stop at stop-sign location ─────────────────────
+        # BasicAgent applies throttle (child 0 of Parallel).
+        # StopAtSign runs as child 1 → its apply_control fires AFTER
+        # BasicAgent in the same tick → brake wins (last call wins in CARLA).
+        class StopAtSign(AtomicBehavior):
+            _APPROACH_M = 20.0   # start braking
+            _STOPPED_KMH = 1.0
+            _HOLD_TICKS  = 40    # 2 s at 20 Hz
+
+            def __init__(inner, loc, name="StopAtSign"):
+                super().__init__(name, ego)
+                inner._loc = loc; inner._state = "approach"; inner._ticks = 0
+
+            def initialise(inner):
+                inner._state = "approach"; inner._ticks = 0
+
+            def update(inner):
+                if inner._loc is None:
+                    return py_trees.common.Status.SUCCESS
+                v     = ego.get_velocity()
+                speed = 3.6 * math.sqrt(v.x**2 + v.y**2)
+                dist  = ego.get_location().distance(inner._loc)
+
+                if inner._state == "approach":
+                    if dist < inner._APPROACH_M:
+                        inner._state = "braking"
+                    return py_trees.common.Status.RUNNING
+
+                if inner._state == "braking":
+                    # Proportional brake: harder as ego gets closer
+                    brake = min(1.0, 0.5 + (inner._APPROACH_M - dist) / inner._APPROACH_M)
+                    ego.apply_control(carla.VehicleControl(throttle=0.0, brake=brake))
+                    if speed < inner._STOPPED_KMH:
+                        inner._state = "holding"
+                        inner._ticks = 0
+                        print(f"[S5_TLC] Ego stopped at stop sign  dist={dist:.1f}m")
+                    return py_trees.common.Status.RUNNING
+
+                if inner._state == "holding":
+                    ego.apply_control(carla.VehicleControl(throttle=0.0, brake=0.9))
+                    inner._ticks += 1
+                    if inner._ticks >= inner._HOLD_TICKS:
+                        print(f"[S5_TLC] Stop sign hold complete — resuming")
+                        return py_trees.common.Status.SUCCESS
+                    return py_trees.common.Status.RUNNING
+
+                return py_trees.common.Status.SUCCESS
+
+        # ── Assemble tree ─────────────────────────────────────────────────
+        # Parallel (SUCCESS_ON_ONE):
+        #   child 0 — EgoBasicAgent drives to dest (obeying TLs)
+        #   child 1 — EventController sequence stages the 3 events
+        #
+        # child 1 order: SetRed → WaitStopFlipGreen → WaitPastTL → StopAtSign → WaitForever
+        # Once StopAtSign succeeds the ego resumes under BasicAgent for the rest
+        # of the duration.
+
+        parallel = py_trees.composites.Parallel(
+            "S5_TrafficLightCruise",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE,
+        )
+
+        parallel.add_child(EgoBasicAgentBehavior(
+            ego, dest, self.target_speed,
+            ignore_tl=False, ignore_vehicles=False,
+            name="EgoCruise_ObeyTL",
+        ))
+
+        ctrl_seq = py_trees.composites.Sequence("EventController")
+        ctrl_seq.add_child(SetTLState(tl_first, carla.TrafficLightState.Red, name="TL1_Red"))
+        ctrl_seq.add_child(WaitStopFlipGreen(tl_first,  name="Event1_WaitFlip"))
+        ctrl_seq.add_child(WaitPastTL(tl_second,         name="Event2_WaitPast"))
+        ctrl_seq.add_child(StopAtSign(stop_loc,          name="Event3_StopSign"))
+        ctrl_seq.add_child(WaitForever())
+
+        parallel.add_child(ctrl_seq)
+
+        return parallel
+
+
+# ---------------------------------------------------------------------------
+# S5_SuddenTurnEvasion — emergency brake + right-turn evasion
+# ---------------------------------------------------------------------------
+
+class S5_SuddenTurnEvasion(AdaptTrustScenario):
+    """
+    Town04 spawn[10] — NPC car 70 m ahead cruises at 40 km/h.
+    Ego approaches at 60 km/h.  When gap closes to 20 m the NPC
+    emergency-stops.  Ego hard-brakes, then DirectLaneChange steers
+    right, then BasicAgent routes through the Town04 right-turn
+    junction at full speed.
+
+    Three trigger events:
+      BRAKING    — ego hard-brakes from 60 → ~20 km/h
+      TURNING    — evasive right steer at the junction
+      ACCELERATING — ego resumes after the turn
+    """
+
+    duration       = 35.0
+    target_speed   = 60.0
+    critical_event = "BRAKING"
+
+    def _do_initialize_actors(self, world):
+        bp_lib  = world.get_blueprint_library()
+        car_bps = [b for b in bp_lib.filter("vehicle.*")
+                   if b.get_attribute("number_of_wheels").as_int() == 4]
+        bp = car_bps[0] if car_bps else bp_lib.filter("vehicle.*")[0]
+
+        ego_wp    = world.get_map().get_waypoint(self._ego().get_location())
+        ahead_wps = ego_wp.next(70.0)
+        if not ahead_wps:
+            self._lead_npc = None
+            print("[S5_STE] WARNING: no waypoint 70 m ahead — no NPC spawned")
+            return
+
+        t = carla.Transform(
+            ahead_wps[0].transform.location + carla.Location(z=0.5),
+            ahead_wps[0].transform.rotation)
+        npc = world.try_spawn_actor(bp, t)
+        if not npc:
+            self._lead_npc = None
+            print("[S5_STE] WARNING: NPC spawn failed")
+            return
+
+        self._lead_npc = npc
+        self.other_actors.append(npc)
+        CarlaDataProvider.register_actor(npc, t)
+        CarlaDataProvider._carla_actor_pool[npc.id] = npc
+        world.tick()
+        CarlaDataProvider.on_carla_tick()
+        loc = npc.get_transform().location
+        print(f"[S5_STE] Lead NPC id={npc.id} at x={loc.x:.1f} y={loc.y:.1f}")
+
+    def _do_create_behavior(self):
+        from srunner.scenariomanager.timer import TimeOut as TOut
+
+        ego  = self._ego()
+        npc  = getattr(self, "_lead_npc", None)
+        dest = self._dest(2000.0)
+
+        world       = CarlaDataProvider.get_world()
+        dest_wp     = world.get_map().get_waypoint(dest)
+        right_wp    = dest_wp.get_right_lane()
+        phase4_dest = right_wp.transform.location if right_wp else dest
+
+        seq = py_trees.composites.Sequence("S5_SuddenTurnEvasion")
+
+        # Phase 1 — approach until gap ≤ 20 m (or 15 s timeout)
+        phase1 = py_trees.composites.Parallel(
+            "S5_Phase1_Approach",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        phase1.add_child(EgoBasicAgentBehavior(ego, dest, self.target_speed,
+                                               ignore_tl=True, name="S5_Approach"))
+        if npc:
+            phase1.add_child(WaypointFollower(npc, 40.0 / 3.6, name="S5_NPCCruise"))
+            phase1.add_child(InTriggerDistanceToVehicle(
+                ego, npc, 20.0, name="S5_GapClose"))
+        phase1.add_child(TOut(15.0, name="S5_Phase1Timeout"))
+        seq.add_child(phase1)
+
+        # Phase 2 — NPC hard stop + ego emergency brake
+        brake_par = py_trees.composites.Parallel(
+            "S5_Phase2_Brake",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        if npc:
+            brake_par.add_child(ForceEgoBrake(npc, ticks=60, brake=1.0,
+                                              name="S5_NPCStop"))
+        brake_par.add_child(ForceEgoBrake(ego, ticks=18, brake=0.8,
+                                          name="S5_EgoBrake"))
+        seq.add_child(brake_par)
+
+        # Phase 3 — evasive right lane change
+        seq.add_child(DirectLaneChange(ego,
+                                       direction='right',
+                                       speed_mps=20.0 / 3.6,
+                                       steer=0.07,
+                                       ticks_steer=35, ticks_straight=30,
+                                       name="S5_EvasiveTurn"))
+
+        # Phase 4 — resume via right-turn junction
+        phase4 = py_trees.composites.Parallel(
+            "S5_Phase4_Resume",
+            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        phase4.add_child(EgoBasicAgentBehavior(ego, phase4_dest, self.target_speed,
+                                               ignore_tl=True, ignore_vehicles=True,
+                                               name="S5_Resume"))
+        phase4.add_child(TOut(15.0, name="S5_Phase4Timeout"))
+        seq.add_child(phase4)
+
+        return seq
+
+
+# ---------------------------------------------------------------------------
 # Registry — maps scenario_id string → class
 # ---------------------------------------------------------------------------
 
@@ -2613,6 +2981,8 @@ SCENARIO_REGISTRY = {
     "S4_EmergencyVehiclePullOver": S4_EmergencyVehiclePullOver,
     "S5_HiddenCyclist":            S5_HiddenCyclist,
     "S5v2_HiddenCyclist":          S5v2_HiddenCyclist,
+    "S5_TrafficLightCruise":       S5_TrafficLightCruise,
+    "S5_SuddenTurnEvasion":        S5_SuddenTurnEvasion,
 }
 
 # Map: scenario_id → (map_name, spawn_index)
@@ -2631,4 +3001,6 @@ SCENARIO_MAP = {
     "S4_EmergencyVehiclePullOver": ("Town02", 0),
     "S5_HiddenCyclist":            ("Town02", 0),
     "S5v2_HiddenCyclist":          ("Town10HD", 1),
+    "S5_TrafficLightCruise":       ("Town10HD", 1),
+    "S5_SuddenTurnEvasion":        ("Town04", 10),
 }

@@ -106,22 +106,37 @@ class SensorBundle:
 # Frame telemetry builder  (mirrors ScenarioBase.build_telemetry)
 # ---------------------------------------------------------------------------
 
+_TL_STATE_MAP = {
+    carla.TrafficLightState.Red:    "red",
+    carla.TrafficLightState.Yellow: "yellow",
+    carla.TrafficLightState.Green:  "green",
+}
+
 def _build_frame(snapshot, ego, start_ts):
     v     = ego.get_velocity()
     speed = 3.6 * math.sqrt(v.x ** 2 + v.y ** 2)   # m/s → km/h
     ctrl  = ego.get_control()
     t     = ego.get_transform()
+
+    # Traffic light state — populated only when ego is inside a TL influence zone
+    try:
+        tl     = ego.get_traffic_light()
+        tl_str = _TL_STATE_MAP.get(tl.get_state(), "none") if tl else "none"
+    except Exception:
+        tl_str = "none"
+
     return {
-        "timestamp":  snapshot.timestamp.elapsed_seconds,
-        "elapsed_s":  snapshot.timestamp.elapsed_seconds - start_ts,
-        "speed_kmh":  round(speed, 3),
-        "throttle":   round(ctrl.throttle, 3),
-        "brake":      round(ctrl.brake, 3),
-        "steer":      round(ctrl.steer, 3),
-        "x":          round(t.location.x, 3),
-        "y":          round(t.location.y, 3),
-        "z":          round(t.location.z, 3),
-        "yaw":        round(t.rotation.yaw, 3),
+        "timestamp":           snapshot.timestamp.elapsed_seconds,
+        "elapsed_s":           snapshot.timestamp.elapsed_seconds - start_ts,
+        "speed_kmh":           round(speed, 3),
+        "throttle":            round(ctrl.throttle, 3),
+        "brake":               round(ctrl.brake, 3),
+        "steer":               round(ctrl.steer, 3),
+        "x":                   round(t.location.x, 3),
+        "y":                   round(t.location.y, 3),
+        "z":                   round(t.location.z, 3),
+        "yaw":                 round(t.rotation.yaw, 3),
+        "traffic_light_state": tl_str,
     }
 
 
@@ -158,6 +173,7 @@ class ScenarioContext:
         self._last_trigger_time = 0.0
         self._steer_sustained   = 0
         self._speed_history: list[tuple[float, float]] = []
+        self._in_green_zone     = False
 
     def check_trigger(self, frame: dict, yolo_detections=None) -> str | None:
         sim_time  = frame["timestamp"]
@@ -208,6 +224,22 @@ class ScenarioContext:
                     x1, _, x2, _ = det["bbox"]
                     if (x2 - x1) / 1920.0 >= self._PED_BBOX_RATIO:
                         return self._fire("PEDESTRIAN_CLOSE", frame)
+
+        # GREEN_LIGHT_PASS: ego cruising through a green TL (not departing from stop)
+        tl_state = frame.get("traffic_light_state", "none")
+        if tl_state == "green" and speed > 12.0:
+            if not self._in_green_zone:
+                self._in_green_zone = True
+                # Only fire if ego has been moving for ≥3 s (was already cruising,
+                # not just accelerating away from the red light we waited at)
+                min_speed_3s = min(
+                    (s for t, s in self._speed_history if t >= sim_time - 3.0),
+                    default=0.0,
+                )
+                if min_speed_3s > 15.0:
+                    return self._fire("GREEN_LIGHT_PASS", frame)
+        elif tl_state != "green":
+            self._in_green_zone = False
 
         return None
 

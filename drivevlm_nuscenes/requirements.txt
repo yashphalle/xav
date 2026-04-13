@@ -1,0 +1,9 @@
+nuscenes-devkit
+opencv-python
+openai
+pillow
+numpy
+gtts
+pydub
+moviepy
+scipy

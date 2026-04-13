@@ -92,6 +92,7 @@ def _template_explanation(
 
     has_pedestrian    = "person"        in nearby
     has_cyclist       = "bicycle"       in nearby
+    has_stop_sign     = "stop sign"     in nearby
     # YOLO traffic light detection — used as fallback when traffic_light_state
     # is absent (recordings made before scenario_base added the field).
     # If the vehicle is braking and YOLO sees a traffic light, it is red.
@@ -115,6 +116,9 @@ def _template_explanation(
         has_vehicle = any(c in (yolo_nearby or []) for c in ("car", "truck", "bus", "motorcycle"))
         if is_emergency and has_vehicle:
             return "Emergency brake! Vehicle ahead."
+        # Stop sign takes priority over traffic light
+        if has_stop_sign:
+            return f"{prefix} Stop sign ahead."
         if tl_state == "yellow":
             return "Braking. Yellow light."
         if tl_state == "red" or has_yolo_tl:
@@ -133,6 +137,12 @@ def _template_explanation(
         if speed_kmh < 15:
             return "Resuming. Road is clear."
         return "Accelerating."
+
+    # ------------------------------------------------------------------
+    # GREEN_LIGHT_PASS — cruising through a green traffic light
+    # ------------------------------------------------------------------
+    if trigger_type == "GREEN_LIGHT_PASS":
+        return "Proceeding. Green light."
 
     # ------------------------------------------------------------------
     # LANE_CHANGE / TURNING — direction from steer sign

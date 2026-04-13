@@ -56,6 +56,7 @@ _YOLO_CLASSES_OF_INTEREST = {
     5: "bus",
     7: "truck",
     9: "traffic light",
+    11: "stop sign",
 }
 
 # YOLOv8 model weights — downloaded automatically on first run
