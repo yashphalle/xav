@@ -1,7 +1,6 @@
 'use client'
 
 import React from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer } from 'recharts'
 
 const CONDITION_COLORS: Record<string, string> = {
   none:             '#64748b',
@@ -11,50 +10,51 @@ const CONDITION_COLORS: Record<string, string> = {
 
 const CONDITION_LABELS: Record<string, string> = {
   none:             'None',
-  vlm_descriptive:  'VLM Desc.',
-  vlm_teleological: 'VLM Teleo.',
+  vlm_descriptive:  'VLM Descriptive',
+  vlm_teleological: 'VLM Teleological',
 }
+
+const CONDITIONS = ['none', 'vlm_descriptive', 'vlm_teleological']
+
+const MIN = 1
+const MAX = 7
 
 interface TransparencyEntry { condition: string; mean: number }
 interface Props { data: TransparencyEntry[] }
 
-function CustomTooltip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-3 text-xs">
-      <p className="font-semibold text-slate-700">{label}</p>
-      <p className="text-slate-600 mt-1">
-        Transparency:{' '}
-        <span className="font-mono font-bold text-slate-900">{payload[0].value.toFixed(2)}</span>
-      </p>
-    </div>
-  )
-}
-
 export default function StiasBar({ data }: Props) {
-  const chartData = data.map((d) => ({
-    condition:    CONDITION_LABELS[d.condition] ?? d.condition,
-    conditionKey: d.condition,
-    mean:         isNaN(d.mean) ? 0 : parseFloat(d.mean.toFixed(3)),
-  }))
+  const entries = CONDITIONS.map((cond) => {
+    const found = data.find((d) => d.condition === cond)
+    const mean  = found && !isNaN(found.mean) ? found.mean : 0
+    return { condition: cond, mean }
+  })
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <BarChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }} barSize={52}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-        <XAxis dataKey="condition" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-        <YAxis
-          domain={[1, 7]} ticks={[1, 2, 3, 4, 5, 6, 7]}
-          tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false}
-          label={{ value: 'Transparency (1–7)', angle: -90, position: 'insideLeft', offset: -5, style: { fontSize: 11, fill: '#94a3b8' } }}
-        />
-        <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(241,245,249,0.8)' }} />
-        <Bar dataKey="mean" radius={[6, 6, 0, 0]}>
-          {chartData.map((entry) => (
-            <Cell key={entry.conditionKey} fill={CONDITION_COLORS[entry.conditionKey]} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <div className="flex flex-col gap-4 py-2">
+      {entries.map(({ condition, mean }) => {
+        const pct   = ((mean - MIN) / (MAX - MIN)) * 100
+        const color = CONDITION_COLORS[condition]
+        return (
+          <div key={condition} className="flex items-center gap-3">
+            <span className="text-xs font-medium text-slate-600 w-32 flex-shrink-0 text-right">
+              {CONDITION_LABELS[condition]}
+            </span>
+            <div className="flex-1 bg-slate-100 rounded-full h-4 overflow-hidden">
+              <div
+                className="h-4 rounded-full transition-all duration-500"
+                style={{ width: `${pct}%`, background: color }}
+              />
+            </div>
+            <span className="text-xs font-mono font-semibold text-slate-700 w-8 flex-shrink-0">
+              {mean > 0 ? mean.toFixed(2) : '-'}
+            </span>
+          </div>
+        )
+      })}
+      <div className="flex justify-between text-[10px] text-slate-400 px-36">
+        <span>1 — Low</span>
+        <span>7 — High</span>
+      </div>
+    </div>
   )
 }

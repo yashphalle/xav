@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer } from 'recharts'
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 
 const CONDITION_COLORS: Record<string, string> = {
   none:             '#64748b',
@@ -11,53 +11,67 @@ const CONDITION_COLORS: Record<string, string> = {
 
 const CONDITION_LABELS: Record<string, string> = {
   none:             'None',
-  vlm_descriptive:  'VLM Desc.',
-  vlm_teleological: 'VLM Teleo.',
+  vlm_descriptive:  'VLM Descriptive',
+  vlm_teleological: 'VLM Teleological',
 }
 
 interface CompEntry { condition: string; accuracy: number; count: number }
 interface Props { data: CompEntry[] }
 
-function CustomTooltip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-lg p-3 text-xs">
-      <p className="font-semibold text-slate-700">{label}</p>
-      <p className="text-slate-600 mt-1">
-        Accuracy:{' '}
-        <span className="font-mono font-bold text-slate-900">{payload[0].value.toFixed(1)}%</span>
-      </p>
-      <p className="text-slate-400">N = {payload[0].payload.count}</p>
-    </div>
-  )
-}
+const CONDITIONS = ['none', 'vlm_descriptive', 'vlm_teleological']
 
 export default function ComprehensionBar({ data }: Props) {
-  const chartData = data.map((d) => ({
-    condition:    CONDITION_LABELS[d.condition] ?? d.condition,
-    conditionKey: d.condition,
-    accuracy:     isNaN(d.accuracy) ? 0 : parseFloat(d.accuracy.toFixed(2)),
-    count:        d.count,
-  }))
+  const entries = CONDITIONS.map((cond) => {
+    const found = data.find((d) => d.condition === cond)
+    const accuracy = found && !isNaN(found.accuracy) ? found.accuracy : 0
+    return { condition: cond, accuracy, count: found?.count ?? 0 }
+  })
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <BarChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }} barSize={52}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-        <XAxis dataKey="condition" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-        <YAxis
-          domain={[0, 100]} ticks={[0, 25, 50, 75, 100]}
-          tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false}
-          tickFormatter={(v) => `${v}%`}
-          label={{ value: '% Correct', angle: -90, position: 'insideLeft', offset: -5, style: { fontSize: 11, fill: '#94a3b8' } }}
-        />
-        <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(241,245,249,0.8)' }} />
-        <Bar dataKey="accuracy" radius={[6, 6, 0, 0]}>
-          {chartData.map((entry) => (
-            <Cell key={entry.conditionKey} fill={CONDITION_COLORS[entry.conditionKey]} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <div className="flex flex-col items-center gap-4">
+      <div className="flex gap-8 justify-center w-full">
+        {entries.map(({ condition, accuracy, count }) => {
+          const correct   = parseFloat(accuracy.toFixed(1))
+          const incorrect = parseFloat((100 - accuracy).toFixed(1))
+          const color     = CONDITION_COLORS[condition]
+          const pieData   = [
+            { name: 'Correct',   value: correct   },
+            { name: 'Incorrect', value: incorrect  },
+          ]
+          return (
+            <div key={condition} className="flex flex-col items-center gap-1">
+              <div style={{ width: 120, height: 120 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={36}
+                      outerRadius={54}
+                      startAngle={90}
+                      endAngle={-270}
+                      dataKey="value"
+                      strokeWidth={0}
+                    >
+                      <Cell fill={color} />
+                      <Cell fill="#e2e8f0" />
+                    </Pie>
+                    <Tooltip
+                      formatter={(v: number) => [`${v.toFixed(1)}%`]}
+                      contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e2e8f0' }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="text-lg font-bold font-mono" style={{ color }}>{correct.toFixed(1)}%</p>
+              <p className="text-xs font-medium text-slate-600 text-center">{CONDITION_LABELS[condition]}</p>
+              {count > 0 && <p className="text-[10px] text-slate-400">N = {count}</p>}
+            </div>
+          )
+        })}
+      </div>
+      <p className="text-[10px] text-slate-400">% comprehension questions answered correctly</p>
+    </div>
   )
 }
